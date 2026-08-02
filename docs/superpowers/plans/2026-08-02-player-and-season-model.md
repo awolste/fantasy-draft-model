@@ -22,9 +22,17 @@
 
 **Why K and DST are now modeled properly.** The original spec deferred them to "replacement level," but the owner supplied exact scoring rules, and a league that *starts* both cannot leave those lineup slots empty in simulation. They remain out of scope as *draft decisions* — the optimizer should still take them last — but their weekly scores must be real numbers with real variance.
 
-**The DST data problem.** Points-allowed and yards-allowed bands are properties of a team's game, not of any player row. They cannot be derived from `weekly_stats`, which is player-level. Stage 2 needs a separate team-level ingest. Budget for this; it is the single largest unknown in the stage.
+**DST is a single shared distribution, not a per-team model.** Owner decision, 2026-08-02: every team's defense draws from the *same* weekly distribution. Defensive scoring is largely luck, there is little to control at the draft, and it is not what this project is trying to answer. Since all ten teams get the same DST distribution, it contributes equal expected points to every roster and cancels out of head-to-head comparisons.
 
-**Correlation is deliberately out of scope for now.** A QB and his WR1 score together; a shootout lifts both teams' skill players. Modeling that properly is a large job, and getting it wrong is worse than omitting it. Task 9 measures how much it matters before anyone builds it.
+This removes what would have been the stage's largest unknown — a team-game-level ingest for points-allowed and yards-allowed, which are not derivable from the player-level `weekly_stats` table. That work is now unnecessary.
+
+**Keep the weekly variance, though.** "Same for everyone" should mean *same distribution*, not *same constant*. A fixed number would strip a genuine source of week-to-week variance out of every roster, and this project's objective is sensitive to variance — a 60% playoff rate means ceiling matters more than consistency. Draw each team's DST score independently from a shared distribution each week, so it still swings individual matchups without advantaging anyone systematically.
+
+Fitting that distribution needs only a mean and spread for a typical starting defense, which can be taken from published DST scoring history rather than a full ingest. If even that proves awkward, a normal distribution with a hand-set mean and standard deviation is acceptable here — this is deliberately the least-precise part of the model.
+
+**Kickers stay individually modeled** (Task 1). Unlike DST, the required stats are already sitting in `weekly_stats` as distance-bucketed columns, so modeling them properly is nearly free. If it later proves noisy, the same shared-distribution treatment applies.
+
+**Correlation is deliberately out of scope for now.** A QB and his WR1 score together; a shootout lifts both teams' skill players. Modeling that properly is a large job, and getting it wrong is worse than omitting it. Task 8 measures how much it matters before anyone builds it.
 
 ## File structure
 
@@ -233,132 +241,82 @@ git commit -m "feat: kicker scoring under league rules"
 
 ---
 
-### Task 2: Team-defense stat ingest
-
-**Files:**
-- Create: `src/ffdraft/sources/nflverse_team.py`
-- Test: `tests/test_nflverse_team.py`
-
-This is the stage's largest unknown. DST scoring needs points allowed, yards allowed, sacks, interceptions, fumble recoveries, safeties, blocks, and defensive/return touchdowns — **per team per game**. None of that is in the player-level `weekly_stats`.
-
-- [ ] **Step 1: Determine what nflverse actually offers**
-
-Do this before writing any code, and report findings:
-
-```bash
-.venv/bin/python -c "
-import nflreadpy as nfl, polars as pl
-for fn in ['load_team_stats','load_schedules','load_pbp']:
-    print('---', fn, hasattr(nfl, fn))
-t = nfl.load_team_stats(seasons=[2024])
-t = t if isinstance(t, pl.DataFrame) else t.to_polars()
-print('team_stats shape:', t.shape)
-print(sorted(t.columns))
-"
-```
-
-Identify which of the required quantities are directly available and which must be derived. Points allowed is likely obtainable from `load_schedules` (final scores by game). Yards allowed is the opponent's total yards, so it may require joining a team's row to its opponent's row in the same game. Sacks/INTs/fumble recoveries are likely present as team defensive stats.
-
-**If any required quantity cannot be obtained from `load_team_stats` + `load_schedules`, stop and report before falling back to play-by-play** — `load_pbp` is enormous and should be a deliberate decision, not a drift.
-
-- [ ] **Step 2: Write the canonical schema and its test**
-
-Target schema, one row per team per game:
-
-```
-season, week, team, opponent,
-points_allowed, yards_allowed,
-sacks, interceptions, fumble_recoveries, safeties, blocks,
-defensive_tds, return_tds, two_pt_returns, one_pt_safeties
-```
-
-Write `tests/test_nflverse_team.py` against a saved fixture, asserting: canonical columns exactly; 32 teams × 17 games ≈ 544 rows for a full season; `points_allowed` for a team equals the opponent's points scored in that game; no nulls in `points_allowed` or `yards_allowed`; and that a known game matches reality (pick any 2024 game and verify the score against the schedule).
-
-The opponent-consistency assertion is the important one — it is the check that catches a bad join, which is the likeliest failure here.
-
-- [ ] **Step 3-5: Implement, verify, commit**
-
-Follow the same adapter pattern as `sources/nflverse.py`: raise rather than defaulting when an expected column is absent, and use `_nflverse_compat.load_from_nflverse` for the package fallback. Write the dataset as `team_defense_stats`.
-
-Commit: `feat: team-game defensive stat ingest`
-
----
-
-### Task 3: Team-defense scoring
+### Task 2: Shared DST distribution
 
 **Files:**
 - Create: `src/ffdraft/models/defense.py`
-- Modify: `src/ffdraft/league.py`
 - Test: `tests/test_defense.py`
 
-- [ ] **Step 1: Write the failing test**
+Per the owner decision above, every team's defense draws from one shared weekly distribution. No team-level stat ingest, no per-team defensive model, no scoring-rule implementation for points-allowed or yards-allowed bands.
 
-The band boundaries are where bugs live. Test every boundary explicitly, including the two neutral bands:
+- [ ] **Step 1: Establish the distribution parameters**
+
+Determine a mean and spread for a typical *starting* fantasy defense in a 10-team league — meaning roughly the top 10 defenses, not the league-wide average across all 32, since only 10 are rostered as starters. Document the source of the numbers in a comment, whether fitted from data or set by hand.
+
+As a sanity anchor: a starting DST in a league scoring like this one typically averages somewhere around 6–9 points per week, with genuinely negative weeks possible when a defense is blown out. If your parameters make negative weeks impossible, the spread is too narrow.
+
+- [ ] **Step 2: Write the failing test**
 
 ```python
+import numpy as np
 import pytest
 
-from ffdraft.models.defense import points_allowed_points, yards_allowed_points, score_defense_line
+from ffdraft.models.defense import DstDistribution, dst_distribution
 
 
-@pytest.mark.parametrize("pa,expected", [
-    (0, 5.0), (1, 4.0), (6, 4.0), (7, 3.0), (13, 3.0), (14, 1.0), (17, 1.0),
-    (18, 0.0), (27, 0.0),           # neutral band -- explicitly zero, not missing
-    (28, -1.0), (34, -1.0), (35, -3.0), (45, -3.0), (46, -5.0), (70, -5.0),
-])
-def test_points_allowed_bands(pa, expected):
-    assert points_allowed_points(pa) == expected
+def test_mean_is_in_a_plausible_starting_dst_range():
+    d = dst_distribution()
+    assert 4.0 <= d.mean <= 12.0
 
 
-@pytest.mark.parametrize("ya,expected", [
-    (0, 5.0), (99, 5.0), (100, 3.0), (199, 3.0), (200, 2.0), (299, 2.0),
-    (300, 0.0), (349, 0.0),         # neutral band
-    (350, -1.0), (399, -1.0), (400, -3.0), (449, -3.0), (450, -5.0), (499, -5.0),
-    (500, -6.0), (549, -6.0), (550, -7.0), (700, -7.0),
-])
-def test_yards_allowed_bands(ya, expected):
-    assert yards_allowed_points(ya) == expected
+def test_sampled_mean_converges_to_stated_mean():
+    d = dst_distribution()
+    rng = np.random.default_rng(0)
+    samples = d.sample(rng, 100_000)
+    assert abs(samples.mean() - d.mean) < 0.15
 
 
-def test_event_scoring():
-    line = {
-        "points_allowed": 10, "yards_allowed": 250,
-        "sacks": 4, "interceptions": 2, "fumble_recoveries": 1,
-        "safeties": 0, "blocks": 0, "defensive_tds": 1, "return_tds": 0,
-        "two_pt_returns": 0, "one_pt_safeties": 0,
-    }
-    # 3 (PA) + 2 (YA) + 4 (sacks) + 4 (INT) + 2 (FR) + 6 (TD) = 21
-    assert score_defense_line(line) == 21.0
+def test_negative_weeks_are_possible():
+    """A defense that gets blown out can score below zero in this league."""
+    d = dst_distribution()
+    rng = np.random.default_rng(0)
+    assert (d.sample(rng, 100_000) < 0).any()
 
 
-def test_negative_defense_week():
-    line = {
-        "points_allowed": 48, "yards_allowed": 560,
-        "sacks": 1, "interceptions": 0, "fumble_recoveries": 0,
-        "safeties": 0, "blocks": 0, "defensive_tds": 0, "return_tds": 0,
-        "two_pt_returns": 0, "one_pt_safeties": 0,
-    }
-    # -5 (PA) + -7 (YA) + 1 (sack) = -11
-    assert score_defense_line(line) == -11.0
+def test_sampling_is_reproducible_from_a_seed():
+    d = dst_distribution()
+    a = d.sample(np.random.default_rng(7), 1000)
+    b = d.sample(np.random.default_rng(7), 1000)
+    assert np.array_equal(a, b)
+
+
+def test_every_team_shares_one_distribution():
+    """The whole point: no team has a DST edge over another."""
+    assert dst_distribution() is dst_distribution() or (
+        dst_distribution().mean == dst_distribution().mean
+    )
 ```
 
-- [ ] **Step 2-4: Implement bands as explicit ordered tuples**
+- [ ] **Step 3: Implement**
 
-Encode both band tables in `league.py` as ordered `(upper_bound_inclusive, points)` tuples with a final catch-all, so no input can fall through without a score. Include the neutral bands explicitly. A lookup that returns `None` for an in-range value must raise, not default to zero — silently scoring a defense at zero would be indistinguishable from a legitimately neutral week.
+Provide `dst_distribution()` returning an object satisfying the same `WeeklyDistribution` protocol used in Task 3, so `sim/` can treat DST identically to every other roster slot. A normal distribution is acceptable here — this is deliberately the least-precise part of the model, and the design note above explains why that is fine.
 
-- [ ] **Step 5: Sanity-check against real data**
+Do **not** add a per-team parameter, even "for future flexibility." The shared distribution is the decision; a per-team hook would invite someone to fill it with noise later and reintroduce a difference that the owner explicitly judged uninteresting.
 
-Score all 2024 team-weeks and report: the highest-scoring DST week, the lowest, and the league-wide mean. Expect a mean around 6–8, a top week in the high 20s or 30s, and genuinely negative weeks to exist. If nothing is ever negative, the yards-allowed band is probably not wired up.
+- [ ] **Step 4: Run tests and commit**
 
-- [ ] **Step 6: Commit**
+Run: `.venv/bin/pytest tests/test_defense.py -v` → 5 passed.
 
 ```bash
-git commit -m "feat: team defense scoring with explicit neutral bands"
+git add src/ffdraft/models/defense.py tests/test_defense.py
+git commit -m "feat: shared DST weekly distribution"
 ```
+
+**Note for whoever reads this later:** the league's full DST scoring rules — the points-allowed and yards-allowed bands, sacks, turnovers, return touchdowns — are recorded in the spec. They are deliberately *not* implemented. If a future stage ever wants per-team defensive modeling, the rules are written down and the missing piece is a team-game-level ingest, which is the work this decision avoided.
 
 ---
 
-### Task 4: Weekly points distributions
+### Task 3: Weekly points distributions
 
 **Files:**
 - Create: `src/ffdraft/models/distribution.py`
@@ -405,7 +363,7 @@ Report the top 20 players by projected weekly mean and confirm they look like a 
 
 ---
 
-### Task 5: Availability model
+### Task 4: Availability model
 
 **Files:**
 - Create: `src/ffdraft/models/availability.py`
@@ -419,7 +377,7 @@ Report historical games-played rates by position. RB availability should be visi
 
 ---
 
-### Task 6: Replacement level
+### Task 5: Replacement level
 
 **Files:**
 - Create: `src/ffdraft/models/replacement.py`
@@ -433,7 +391,7 @@ Report replacement level by position. This number drives whether late-round RB s
 
 ---
 
-### Task 7: Weekly lineup optimizer
+### Task 6: Weekly lineup optimizer
 
 **Files:**
 - Create: `src/ffdraft/sim/__init__.py`, `src/ffdraft/sim/lineup.py`
@@ -445,11 +403,11 @@ This is a small assignment problem; a greedy fill is **not** always optimal once
 
 Tests must include: the standard case; a case where greedy-by-position gives the wrong answer and the optimizer beats it; an injured/unavailable player being excluded; a roster too thin to fill every slot (must score the empty slot as zero, not crash); and that FLEX never takes a QB, K, or DST.
 
-Performance matters — this runs inside the innermost simulation loop. Report the per-call timing and confirm it is fast enough for the budget in Task 8.
+Performance matters — this runs inside the innermost simulation loop. Report the per-call timing and confirm it is fast enough for the budget in Task 7.
 
 ---
 
-### Task 8: Season simulator
+### Task 7: Season simulator
 
 **Files:**
 - Create: `src/ffdraft/sim/season.py`
@@ -469,12 +427,12 @@ Report the timing for 1,000 season simulations. Stage 3 needs roughly 15 candida
 
 ---
 
-### Task 9: Correlation impact measurement
+### Task 8: Correlation impact measurement
 
 **Files:**
 - Create: `tests/test_correlation_impact.py` or a short script under `scripts/`
 
-Player scores are correlated — a QB and his top receiver rise together, and a shootout lifts both teams. Task 8 treats players as independent, which understates the variance of a stacked roster.
+Player scores are correlated — a QB and his top receiver rise together, and a shootout lifts both teams. Task 7 treats players as independent, which understates the variance of a stacked roster.
 
 Do **not** implement correlation. Measure whether it matters:
 
@@ -493,4 +451,4 @@ If it is material, that becomes a task in Stage 3's plan with real evidence behi
 - 1,000 season simulations complete within a documented time budget.
 - Kickers and defenses produce real, non-zero, appropriately variable weekly scores.
 - The 2024 calibration check has been run and reported.
-- Task 9's correlation finding is recorded, with a recommendation for Stage 3.
+- Task 8's correlation finding is recorded, with a recommendation for Stage 3.
