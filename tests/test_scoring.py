@@ -10,6 +10,7 @@ STAT_COLUMNS = [
     "passing_yards", "passing_tds", "interceptions",
     "rushing_yards", "rushing_tds",
     "receptions", "receiving_yards", "receiving_tds",
+    "special_teams_tds",
     "fumbles_lost", "two_pt_conversions",
 ]
 
@@ -34,6 +35,13 @@ def test_passing_yards_quarter_point_per_25():
 
 def test_full_ppr_reception_worth_one():
     assert score_stat_line(blank_line(receptions=8), SCORING) == 8.0
+
+
+def test_return_touchdown_worth_six():
+    """KRTD/PRTD are worth 6 in this league, same as any other TD -- the
+    original bug scored every return TD as zero because ScoringRules had no
+    term for it."""
+    assert score_stat_line(blank_line(special_teams_tds=1), SCORING) == 6.0
 
 
 def test_interceptions_and_fumbles_are_negative():

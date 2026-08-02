@@ -22,6 +22,7 @@ class ScoringRules:
     rec: float = 1.0            # full PPR
     rec_yd: float = 0.1
     rec_td: float = 6.0
+    return_td: float = 6.0      # kickoff/punt return TD (KRTD/PRTD)
     fumble_lost: float = -2.0
     two_pt: float = 2.0
 

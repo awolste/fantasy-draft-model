@@ -69,6 +69,7 @@ def test_alternate_aliases_resolve():
         "targets": [0],
         "receiving_yards": [0],
         "receiving_tds": [0],
+        "special_teams_tds": [0],
     })
     out = normalize_weekly(raw)
     assert out.columns == list(CANONICAL_COLUMNS)
@@ -99,11 +100,41 @@ def test_missing_optional_summed_parts_default_to_zero():
         "targets": [3],
         "receiving_yards": [15],
         "receiving_tds": [0],
+        "special_teams_tds": [0],
     })
     out = normalize_weekly(raw)
     row = out.row(0, named=True)
     assert row["fumbles_lost"] == 0.0
     assert row["two_pt_conversions"] == 0.0
+
+
+def test_return_touchdown_flows_through_and_scores_six():
+    """special_teams_tds (kickoff/punt return TDs) must reach the canonical
+    frame and score 6 points, matching the league's KRTD/PRTD rule -- the
+    original bug scored these as zero because normalize_weekly dropped the
+    column entirely."""
+    raw = pl.DataFrame({
+        "player_id": ["00-2222222"],
+        "player_name": ["Return Man"],
+        "position": ["WR"],
+        "team": ["KC"],
+        "season": [2024],
+        "week": [1],
+        "passing_yards": [0],
+        "passing_tds": [0],
+        "interceptions": [0],
+        "rushing_yards": [0],
+        "rushing_tds": [0],
+        "receptions": [0],
+        "targets": [0],
+        "receiving_yards": [0],
+        "receiving_tds": [0],
+        "special_teams_tds": [1],
+    })
+    out = normalize_weekly(raw)
+    row = out.row(0, named=True)
+    assert row["special_teams_tds"] == 1
+    assert row["fantasy_points"] == 6.0
 
 
 def test_missing_required_column_raises():
