@@ -1591,6 +1591,10 @@ This is the task that catches the failure mode described at the top of the plan:
 >
 > Also noted during that investigation: **`db_season` is useless as a recency signal** — it is `2026` for every row, i.e. a data-snapshot date, not last-active-season. `team` is also unreliable (retired players retain a stale team). `draft_year` is the only trustworthy recency field, with 101 nulls out of 12,470 rows.
 
+> **Correction from Task 6 execution — `check_draft_completeness(expected_picks=180)` is wrong.** Verified against the live API: the league drafted **17 rounds (170 picks) in 2018–2022 and 18 rounds (180 picks) from 2023 onward**. Team count was 10 in all eight seasons. A fixed expectation of 180 fails five of the eight years.
+>
+> Derive the expected pick count per season from the data (`n_teams × max(round)`) and assert internal consistency — that every round is complete and `overall_pick` runs 1..N without gaps — rather than hardcoding a league-wide constant. Note also that `ROSTER_SIZE = 18` in `league.py` describes the **2026** league; it is not valid for pre-2023 seasons, which matters for any historical model that assumes roster depth.
+
 - [ ] **Step 1: Write the failing test**
 
 Create `tests/test_validate.py`:
