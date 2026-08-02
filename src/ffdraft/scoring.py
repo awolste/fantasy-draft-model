@@ -22,6 +22,7 @@ STAT_TO_RULE: dict[str, str] = {
     "receiving_yards": "rec_yd",
     "receiving_tds": "rec_td",
     "special_teams_tds": "return_td",
+    "fumble_recovery_tds": "fumble_recovery_td",
     "fumbles_lost": "fumble_lost",
     "two_pt_conversions": "two_pt",
 }

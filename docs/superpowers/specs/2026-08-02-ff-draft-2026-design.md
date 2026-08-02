@@ -139,9 +139,42 @@ ESPN ADP is therefore not a substitute for FFC, but it is worth ingesting for **
 
 Trade evaluation, in-season roster management, auction drafts, dynasty/keeper formats, building projections from scratch, and any modeling of K or DST beyond replacement level.
 
+## K and DST scoring — RESOLVED 2026-08-02
+
+The owner supplied the league's exact settings, so both positions can be modeled properly rather than approximated at replacement level.
+
+**Kicking**
+
+| Rule | Points |
+|---|---|
+| PAT made | 1 |
+| FG 0–39 | 3 |
+| FG 40–49 | 4 |
+| FG 50–59 | 5 |
+| FG 60+ | 5 |
+| FG missed | −1 |
+
+Note FG 50–59 and 60+ are both 5, so distance beyond 50 carries no extra value.
+
+**Team Defense / Special Teams**
+
+Event scoring: any defensive or return TD 6; sack 1; interception 2; fumble recovery 2; safety 2; blocked punt/PAT/FG 2; 2-point return 2; 1-point safety 1.
+
+Points allowed: 0 → 5, 1–6 → 4, 7–13 → 3, 14–17 → 1, **18–27 → 0**, 28–34 → −1, 35–45 → −3, 46+ → −5.
+
+Yards allowed: <100 → 5, 100–199 → 3, 200–299 → 2, **300–349 → 0**, 350–399 → −1, 400–449 → −3, 450–499 → −5, 500–549 → −6, 550+ → −7.
+
+The two unlisted bands are neutral, not missing — they must be encoded as explicit zero-scoring bands so a lookup cannot silently fall through.
+
+**Miscellaneous (applies to skill players)**
+
+Kickoff return TD 6, punt return TD 6, fumble recovered for TD 6, fumbles lost −2. The first three were **missing from the Stage 1 scoring engine** and were added as follow-ups; return TDs alone affected 151 rows of `weekly_stats`.
+
+Because yards- and points-allowed bands are team-game-level, DST scoring cannot be derived from the player-level weekly table and requires a separate team-level ingest in Stage 2.
+
 ## Open questions
 
-**K and DST scoring — must be resolved before Stage 2.** The league starts one kicker and one defense, so the season simulator has to put a number in both lineup slots every week. But `ScoringRules` has no kicking or defensive terms, and Stage 1's `FANTASY_POSITIONS` excludes DST entirely. The consequence, confirmed against real ingested data: **every kicker scores 0.0 fantasy points, and defenses have no data at all.**
+*(Resolved — retained for the reasoning.)* **K and DST scoring.** The league starts one kicker and one defense, so the season simulator has to put a number in both lineup slots every week. But `ScoringRules` has no kicking or defensive terms, and Stage 1's `FANTASY_POSITIONS` excludes DST entirely. The consequence, confirmed against real ingested data: **every kicker scores 0.0 fantasy points, and defenses have no data at all.**
 
 This follows from the out-of-scope decision above ("no modeling of K or DST beyond replacement level"), which is still the right call for *draft* purposes — these are last-round picks and streamed all season. But "beyond replacement level" still requires *a* replacement level, not zero. Stage 2 must pick one of:
 

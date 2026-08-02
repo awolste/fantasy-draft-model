@@ -17,7 +17,7 @@ CANONICAL_COLUMNS = (
     "passing_yards", "passing_tds", "interceptions",
     "rushing_yards", "rushing_tds",
     "receptions", "targets", "receiving_yards", "receiving_tds",
-    "special_teams_tds",
+    "special_teams_tds", "fumble_recovery_tds",
     "fumbles_lost", "two_pt_conversions",
     "fantasy_points",
 )
@@ -43,6 +43,7 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "receiving_yards": ("receiving_yards",),
     "receiving_tds": ("receiving_tds",),
     "special_teams_tds": ("special_teams_tds",),
+    "fumble_recovery_tds": ("fumble_recovery_tds",),
 }
 
 # Summed rather than aliased, because upstream splits fumbles by play type.

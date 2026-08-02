@@ -70,6 +70,7 @@ def test_alternate_aliases_resolve():
         "receiving_yards": [0],
         "receiving_tds": [0],
         "special_teams_tds": [0],
+        "fumble_recovery_tds": [0],
     })
     out = normalize_weekly(raw)
     assert out.columns == list(CANONICAL_COLUMNS)
@@ -101,6 +102,7 @@ def test_missing_optional_summed_parts_default_to_zero():
         "receiving_yards": [15],
         "receiving_tds": [0],
         "special_teams_tds": [0],
+        "fumble_recovery_tds": [0],
     })
     out = normalize_weekly(raw)
     row = out.row(0, named=True)
@@ -130,10 +132,41 @@ def test_return_touchdown_flows_through_and_scores_six():
         "receiving_yards": [0],
         "receiving_tds": [0],
         "special_teams_tds": [1],
+        "fumble_recovery_tds": [0],
     })
     out = normalize_weekly(raw)
     row = out.row(0, named=True)
     assert row["special_teams_tds"] == 1
+    assert row["fantasy_points"] == 6.0
+
+
+def test_fumble_recovery_touchdown_flows_through_and_scores_six():
+    """fumble_recovery_tds (FTD) must reach the canonical frame and score 6
+    points, matching the league's FTD rule. Distinct from special_teams_tds
+    -- nflverse tracks fumble-recovery TDs separately from punt/kickoff
+    return TDs."""
+    raw = pl.DataFrame({
+        "player_id": ["00-3333333"],
+        "player_name": ["Scoop Guy"],
+        "position": ["RB"],
+        "team": ["DAL"],
+        "season": [2024],
+        "week": [1],
+        "passing_yards": [0],
+        "passing_tds": [0],
+        "interceptions": [0],
+        "rushing_yards": [0],
+        "rushing_tds": [0],
+        "receptions": [0],
+        "targets": [0],
+        "receiving_yards": [0],
+        "receiving_tds": [0],
+        "special_teams_tds": [0],
+        "fumble_recovery_tds": [1],
+    })
+    out = normalize_weekly(raw)
+    row = out.row(0, named=True)
+    assert row["fumble_recovery_tds"] == 1
     assert row["fantasy_points"] == 6.0
 
 

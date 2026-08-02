@@ -12,8 +12,8 @@ Each stage produces working, independently testable software. Stages are written
 
 | # | Plan | Produces | Status |
 |---|---|---|---|
-| 1 | [`2026-08-02-data-foundation.md`](2026-08-02-data-foundation.md) | Every input pulled, ID-matched, scored under league rules, validated | **In progress** |
-| 2 | *not yet written* — `player-and-season-model.md` | Weekly points distributions per player; season simulator taking 10 rosters to a champion | Not started |
+| 1 | [`2026-08-02-data-foundation.md`](2026-08-02-data-foundation.md) | Every input pulled, ID-matched, scored under league rules, validated | **Complete** — 97 tests, 9 datasets |
+| 2 | [`2026-08-02-player-and-season-model.md`](2026-08-02-player-and-season-model.md) | Weekly points distributions per player; season simulator taking 10 rosters to a champion | **Ready to start** |
 | 3 | *not yet written* — `opponent-model-and-optimizer.md` | Opponent draft model, draft rollout, recommender, backtest, and the 0RB vs. Hero RB answer | Not started |
 | 4 | *not yet written* — `live-assistant.md` | Streamlit draft-day tool with type-ahead pick entry | Not started |
 
@@ -30,6 +30,8 @@ These are the non-obvious constraints that took a conversation to establish. The
 - **Defenses go earlier than ADP here** because benches are deep. Used as a check that the opponent model fitted correctly.
 - **Draft slot is 8** in a 10-team snake, so picks come in back-to-back pairs near the turn (8 and 13) and are better planned as pairs.
 - **The backtest is a gate, not a formality.** If the engine does not beat ADP-following on held-out 2025, it does not work. A large apparent edge means overfitting, not success.
+- **K and DST scoring settings are now known** and recorded in the spec. Two bands are *neutral, not missing*: points allowed 18–27 and yards allowed 300–349 both score 0. Encode them explicitly so a lookup cannot silently fall through. Also note FG 50–59 and 60+ both score 5 — distance past 50 buys nothing in this league.
+- **DST scoring cannot come from `weekly_stats`.** Points- and yards-allowed are team-game properties, not player rows, so Stage 2 needs a separate team-level ingest. This is the largest unknown in Stage 2.
 - **Kickers are entirely absent from the model, not merely approximate.** They match the ID crosswalk at **0.0%** (nflverse's `load_ff_playerids` has essentially no kicker coverage by name) *and* score 0.0 fantasy points (no kicking terms in `ScoringRules`). Two independent gaps stacking on the same position. Any Stage 2 approach must treat K as a modeled constant, not as a player looked up by ID.
 - **The collision-review rule is too noisy as built.** `validate.py` flags collision groups whose top-2 `draft_year` values are within 10 years; that catches 162 of 363 fantasy-relevant groups (45%). Many are not father/son pairs but duplicate nflverse entries where the discarded row carries a `draft_year=0` sentinel. Exclude sentinel rows before applying the rule to make the output actionable.
 - **K and DST currently score zero.** Confirmed against real data: `ScoringRules` has no kicking or defensive terms and DST is not ingested, so every kicker scores 0.0 and defenses have no rows. The league starts both. This must be resolved before Stage 2's season simulator, and it needs the owner's exact ESPN K/DST scoring settings. See "Open questions" in the spec.
