@@ -46,3 +46,86 @@ def test_quarterback_points_reflect_six_point_tds(raw):
     row = qbs.row(0, named=True)
     four_pt_equivalent = row["fantasy_points"] - 2 * row["passing_tds"]
     assert row["fantasy_points"] > four_pt_equivalent
+
+
+def test_alternate_aliases_resolve():
+    """A frame using the non-primary candidate for every multi-candidate
+    alias must still normalize correctly. The real fixture only exercises
+    whichever candidate happened to be present in that one nflreadpy
+    release, so this is the only place the other candidates are covered."""
+    raw = pl.DataFrame({
+        "gsis_id": ["00-1234567"],
+        "player_name": ["Test Player"],
+        "position": ["QB"],
+        "recent_team": ["BUF"],
+        "season": [2024],
+        "week": [1],
+        "passing_yards": [300],
+        "passing_tds": [3],
+        "passing_interceptions": [1],
+        "rushing_yards": [20],
+        "rushing_tds": [1],
+        "receptions": [0],
+        "targets": [0],
+        "receiving_yards": [0],
+        "receiving_tds": [0],
+    })
+    out = normalize_weekly(raw)
+    assert out.columns == list(CANONICAL_COLUMNS)
+    row = out.row(0, named=True)
+    assert row["player_id"] == "00-1234567"
+    assert row["player_name"] == "Test Player"
+    assert row["team"] == "BUF"
+    assert row["interceptions"] == 1
+    assert row["passing_tds"] == 3
+
+
+def test_missing_optional_summed_parts_default_to_zero():
+    """When none of FUMBLE_PARTS or TWO_PT_PARTS are present upstream, the
+    summed columns must come back as 0.0 rather than erroring or null."""
+    raw = pl.DataFrame({
+        "player_id": ["00-1111111"],
+        "player_name": ["Another Player"],
+        "position": ["RB"],
+        "team": ["SF"],
+        "season": [2024],
+        "week": [1],
+        "passing_yards": [0],
+        "passing_tds": [0],
+        "interceptions": [0],
+        "rushing_yards": [50],
+        "rushing_tds": [1],
+        "receptions": [2],
+        "targets": [3],
+        "receiving_yards": [15],
+        "receiving_tds": [0],
+    })
+    out = normalize_weekly(raw)
+    row = out.row(0, named=True)
+    assert row["fumbles_lost"] == 0.0
+    assert row["two_pt_conversions"] == 0.0
+
+
+def test_missing_required_column_raises():
+    """If no candidate for a required canonical column is present upstream,
+    normalize_weekly must raise rather than silently producing an all-null
+    column that add_fantasy_points would then treat as zero."""
+    raw = pl.DataFrame({
+        "player_id": ["00-1111111"],
+        "player_name": ["Another Player"],
+        "position": ["RB"],
+        "team": ["SF"],
+        "season": [2024],
+        "week": [1],
+        "passing_yards": [0],
+        # passing_tds intentionally omitted under every alias
+        "interceptions": [0],
+        "rushing_yards": [50],
+        "rushing_tds": [1],
+        "receptions": [2],
+        "targets": [3],
+        "receiving_yards": [15],
+        "receiving_tds": [0],
+    })
+    with pytest.raises(ValueError, match="passing_tds"):
+        normalize_weekly(raw)

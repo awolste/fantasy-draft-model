@@ -53,17 +53,17 @@ def _resolve(df: pl.DataFrame, canonical: str) -> pl.Expr:
     for candidate in ALIASES[canonical]:
         if candidate in df.columns:
             return pl.col(candidate).alias(canonical)
-    return pl.lit(None).alias(canonical)
+    raise ValueError(
+        f"No upstream column found for {canonical!r}. "
+        f"Tried {ALIASES[canonical]}; available columns: {sorted(df.columns)}"
+    )
 
 
 def _sum_parts(df: pl.DataFrame, parts: tuple[str, ...], name: str) -> pl.Expr:
     present = [pl.col(p).fill_null(0.0) for p in parts if p in df.columns]
     if not present:
         return pl.lit(0.0).alias(name)
-    expr = present[0]
-    for part in present[1:]:
-        expr = expr + part
-    return expr.alias(name)
+    return pl.sum_horizontal(present).alias(name)
 
 
 def normalize_weekly(raw: pl.DataFrame) -> pl.DataFrame:
@@ -88,13 +88,13 @@ def load_raw(seasons: tuple[int, ...]) -> pl.DataFrame:
     """Fetch from whichever nflverse package is installed."""
     try:
         import nflreadpy as nfl
-
-        data = nfl.load_player_stats(seasons=list(seasons))
-        return data if isinstance(data, pl.DataFrame) else data.to_polars()
     except ImportError:
         import nfl_data_py
 
         return pl.from_pandas(nfl_data_py.import_weekly_data(list(seasons)))
+
+    data = nfl.load_player_stats(seasons=list(seasons))
+    return data if isinstance(data, pl.DataFrame) else data.to_polars()
 
 
 def ingest(seasons: tuple[int, ...] = STATS_SEASONS) -> pl.DataFrame:
