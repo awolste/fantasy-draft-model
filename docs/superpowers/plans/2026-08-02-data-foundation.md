@@ -1579,6 +1579,10 @@ git commit -m "feat: FantasyPros ECR rankings and consensus ADP ingest"
 
 This is the task that catches the failure mode described at the top of the plan: an ID mismatch that produces plausible-looking but wrong data. It fails loudly rather than warning quietly.
 
+> **Correction from Task 5 execution — `check_id_match_rate` as specified below is wrong.** It measures the fraction of rows carrying a non-null `gsis_id`. But nflverse assigns `gsis_id` only once a player is on an NFL roster, so **every incoming rookie has a null `gsis_id`** — 2,045 fantasy-relevant players in the real crosswalk. Measuring match rate on `gsis_id` would count every rookie as unmatched, and since rookies are among the most important players in a 2026 draft, the check would either fail spuriously or get its threshold lowered until it means nothing.
+>
+> Measure instead whether the row **matched a crosswalk entry at all** — i.e. resolved to any of `gsis_id`, `espn_id`, or `sleeper_id` — and report per-ID coverage separately as diagnostics rather than as the pass/fail gate. Defenses also need excluding before the check, as noted in Task 10 Step 2.
+
 - [ ] **Step 1: Write the failing test**
 
 Create `tests/test_validate.py`:
