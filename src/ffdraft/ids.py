@@ -68,15 +68,12 @@ def match_by_name(df: pl.DataFrame, crosswalk: pl.DataFrame) -> pl.DataFrame:
     return out.drop("_key")
 
 
-def _dedupe_by_name_position(df: pl.DataFrame) -> pl.DataFrame:
-    """Collapse crosswalk rows that share a normalized (name, position) key.
+def _ranked_for_dedupe(df: pl.DataFrame) -> pl.DataFrame:
+    """Sort crosswalk rows within each (`_key`, `position`) group, best first.
 
-    `normalize_name` strips generational suffixes (Jr./Sr./II/III/...), so
-    father-son pairs collide: e.g. "Marvin Harrison Jr." and "Marvin
-    Harrison Sr." both normalize to "marvin harrison"/WR. `match_by_name`
-    joins on exactly that pair, so an un-deduped crosswalk silently
-    multiplies output rows -- a single input row for Marvin Harrison Jr.
-    joined to 3 crosswalk rows and produced 3 output rows with no error.
+    Shared by `_dedupe_by_name_position` (keeps only the winner) and
+    `find_collision_groups` (keeps everyone, tagged winner/loser), so the two
+    never drift apart on what "best" means.
 
     Preference order, most to least authoritative:
       1. Highest `draft_year` -- these collisions are overwhelmingly
@@ -95,7 +92,7 @@ def _dedupe_by_name_position(df: pl.DataFrame) -> pl.DataFrame:
          of upstream row order or polars sort stability, rather than
          depending on whatever order the source data happens to arrive in.
     """
-    ranked = df.with_columns(
+    return df.with_columns(
         pl.col("draft_year").fill_null(-1).alias("_draft_rank"),
         pl.col("gsis_id").is_not_null().alias("_has_gsis"),
         pl.col("espn_id").is_not_null().alias("_has_espn"),
@@ -107,13 +104,57 @@ def _dedupe_by_name_position(df: pl.DataFrame) -> pl.DataFrame:
         descending=[False, False, True, True, True, False, False, False, False],
         nulls_last=True,
     )
+
+
+def _dedupe_by_name_position(df: pl.DataFrame) -> pl.DataFrame:
+    """Collapse crosswalk rows that share a normalized (name, position) key.
+
+    `normalize_name` strips generational suffixes (Jr./Sr./II/III/...), so
+    father-son pairs collide: e.g. "Marvin Harrison Jr." and "Marvin
+    Harrison Sr." both normalize to "marvin harrison"/WR. `match_by_name`
+    joins on exactly that pair, so an un-deduped crosswalk silently
+    multiplies output rows -- a single input row for Marvin Harrison Jr.
+    joined to 3 crosswalk rows and produced 3 output rows with no error.
+
+    Keeps only the winner of each collision group -- see `_ranked_for_dedupe`
+    for the preference order. The discarded rows are NOT lost: they are
+    still recoverable via `find_collision_groups`, which `ids.ingest()`
+    persists as the `crosswalk_collisions` dataset for `validate.py` to
+    report on.
+    """
+    ranked = _ranked_for_dedupe(df)
     return ranked.unique(
         subset=["_key", "position"], keep="first", maintain_order=True
     ).drop(["_draft_rank", "_has_gsis", "_has_espn"])
 
 
-def load_crosswalk() -> pl.DataFrame:
-    """Build the crosswalk from nflverse's ID table plus Sleeper's player dump."""
+def find_collision_groups(df: pl.DataFrame) -> pl.DataFrame:
+    """Return every row that shares a normalized (name, position) key with at
+    least one other row -- i.e. every row involved in a collision that
+    `_dedupe_by_name_position` resolves by keeping one and discarding the
+    rest. Includes both the kept (winning) and discarded (losing) rows,
+    tagged by `is_kept`, so callers can audit what the dedupe step would
+    otherwise silently drop. Rows with no collision are excluded.
+    """
+    ranked = _ranked_for_dedupe(df)
+    ranked = ranked.with_columns(
+        pl.len().over(["_key", "position"]).alias("_group_size")
+    )
+    groups = ranked.filter(pl.col("_group_size") > 1)
+    groups = groups.with_columns(
+        (pl.int_range(pl.len()).over(["_key", "position"]) == 0).alias("is_kept")
+    )
+    return (
+        groups.drop(["_draft_rank", "_has_gsis", "_has_espn", "_group_size"])
+        .rename({"_key": "name_key"})
+    )
+
+
+def _load_prepared_ids() -> pl.DataFrame:
+    """Fetch and clean the raw ID table, up through assigning `_key`, but
+    before collapsing collisions. Shared by `load_crosswalk` (which only
+    needs the winners) and `ingest` (which also persists the losers).
+    """
     try:
         import nflreadpy as nfl
 
@@ -142,12 +183,30 @@ def load_crosswalk() -> pl.DataFrame:
     no_gsis = ids.filter(pl.col("gsis_id").is_null())
     ids = pl.concat([has_gsis, no_gsis])
 
-    ids = _with_key(ids)
-    ids = _dedupe_by_name_position(ids)
-    return ids.drop(["_key", "draft_year"]).select(list(CROSSWALK_COLUMNS))
+    return _with_key(ids)
+
+
+def load_crosswalk() -> pl.DataFrame:
+    """Build the crosswalk from nflverse's ID table plus Sleeper's player dump."""
+    ids = _load_prepared_ids()
+    kept = _dedupe_by_name_position(ids)
+    return kept.drop(["_key", "draft_year"]).select(list(CROSSWALK_COLUMNS))
 
 
 def ingest() -> pl.DataFrame:
-    df = load_crosswalk()
-    write("id_crosswalk", df)
-    return df
+    """Build and persist the crosswalk, plus the collisions it discards.
+
+    `crosswalk_collisions` is a separate dataset rather than a second return
+    value threaded through `load_crosswalk`, so every existing caller of
+    `load_crosswalk` (which only ever wanted the winners) is unaffected, and
+    the collisions live where `store.py`'s "one dataset per file" convention
+    already expects them -- readable independently by `validate.py` without
+    re-running the nflverse fetch.
+    """
+    ids = _load_prepared_ids()
+    collisions = find_collision_groups(ids)
+    kept = _dedupe_by_name_position(ids)
+    crosswalk = kept.drop(["_key", "draft_year"]).select(list(CROSSWALK_COLUMNS))
+    write("id_crosswalk", crosswalk)
+    write("crosswalk_collisions", collisions)
+    return crosswalk
