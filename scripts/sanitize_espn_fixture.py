@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 GUID_PATTERN = re.compile(r"\{[0-9A-Fa-f-]{30,40}\}")
+PLACEHOLDER_LEAGUE_ID = 1234567
 
 
 def _fake_guid(index: int) -> str:
@@ -60,6 +61,12 @@ def sanitize(payload: dict) -> dict:
     if isinstance(settings, dict) and "name" in settings:
         settings["name"] = "Test League"
 
+    # The league id is a lookup key into the real league on ESPN. Harmless on
+    # its own while the league is private, but it should not ship in a public
+    # repo that describes the league in detail, and ESPN visibility can change.
+    if "id" in data:
+        data["id"] = PLACEHOLDER_LEAGUE_ID
+
     return data
 
 
@@ -93,6 +100,9 @@ def assert_clean(data: dict, forbidden: list[str]) -> None:
     settings = data.get("settings")
     if isinstance(settings, dict) and settings.get("name") not in (None, "Test League"):
         raise SystemExit("Sanitization failed; settings.name not replaced.")
+
+    if "id" in data and data["id"] != PLACEHOLDER_LEAGUE_ID:
+        raise SystemExit("Sanitization failed; league id not replaced.")
 
     for index, member in enumerate(data.get("members", []), start=1):
         if member.get("lastName") != "Anonymized":
