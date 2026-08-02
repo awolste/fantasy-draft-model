@@ -8,9 +8,21 @@ ever sees an upstream column name.
 import polars as pl
 
 from ..league import STATS_SEASONS
+from ..models.kicking import add_kicking_points
 from ..scoring import add_fantasy_points
 from ..store import write
 from ._nflverse_compat import load_from_nflverse
+
+# Kicker stat columns. Optional (default 0.0 when absent) rather than
+# required via `_resolve`, matching FUMBLE_PARTS/TWO_PT_PARTS -- they are
+# only ever populated for K rows, so every skill-position row upstream is
+# legitimately missing them, not silently corrupted.
+KICKING_STAT_COLUMNS = (
+    "pat_made",
+    "fg_made_0_19", "fg_made_20_29", "fg_made_30_39",
+    "fg_made_40_49", "fg_made_50_59", "fg_made_60_",
+    "fg_missed", "fg_blocked",
+)
 
 CANONICAL_COLUMNS = (
     "player_id", "player_name", "position", "team", "season", "week",
@@ -19,6 +31,7 @@ CANONICAL_COLUMNS = (
     "receptions", "targets", "receiving_yards", "receiving_tds",
     "special_teams_tds", "fumble_recovery_tds",
     "fumbles_lost", "two_pt_conversions",
+    *KICKING_STAT_COLUMNS,
     "fantasy_points",
 )
 
@@ -70,11 +83,25 @@ def _sum_parts(df: pl.DataFrame, parts: tuple[str, ...], name: str) -> pl.Expr:
     return pl.sum_horizontal(present).alias(name)
 
 
+def _optional_col(df: pl.DataFrame, name: str) -> pl.Expr:
+    """Pass a column through if present (nulls -> 0.0), else default to 0.0.
+
+    Used for kicker stat columns, which are only ever populated for K rows
+    upstream -- absence for a skill-position row (or a synthetic test frame
+    that never mentions kicking at all) is legitimate, not a data error, so
+    this defaults rather than raising like `_resolve` does.
+    """
+    if name in df.columns:
+        return pl.col(name).fill_null(0.0).alias(name)
+    return pl.lit(0.0).alias(name)
+
+
 def normalize_weekly(raw: pl.DataFrame) -> pl.DataFrame:
     df = raw.select(
         [_resolve(raw, c) for c in ALIASES]
         + [_sum_parts(raw, FUMBLE_PARTS, "fumbles_lost"),
            _sum_parts(raw, TWO_PT_PARTS, "two_pt_conversions")]
+        + [_optional_col(raw, c) for c in KICKING_STAT_COLUMNS]
     )
     df = df.filter(
         pl.col("position").is_in(list(FANTASY_POSITIONS))
@@ -84,7 +111,19 @@ def normalize_weekly(raw: pl.DataFrame) -> pl.DataFrame:
         pl.col("season").cast(pl.Int64),
         pl.col("week").cast(pl.Int64),
     )
-    df = add_fantasy_points(df)
+    # A single `fantasy_points` column, correct for every position: skill
+    # positions score under the standard league rules, K rows score under
+    # the kicking-specific rules (see `models/kicking.py`). Both scorers run
+    # over every row -- cheap, and it keeps this as one column-wise op
+    # rather than a filter/concat that could silently drop or duplicate rows.
+    skill_points = add_fantasy_points(df)["fantasy_points"]
+    kicking_points = add_kicking_points(df)["fantasy_points"]
+    df = df.with_columns(
+        pl.when(pl.col("position") == "K")
+        .then(kicking_points)
+        .otherwise(skill_points)
+        .alias("fantasy_points")
+    )
     return df.select(list(CANONICAL_COLUMNS))
 
 
