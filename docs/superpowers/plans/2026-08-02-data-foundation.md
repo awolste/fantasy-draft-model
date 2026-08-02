@@ -518,7 +518,14 @@ git commit -m "feat: parquet storage helpers"
 - Create: `src/ffdraft/sources/nflverse.py`
 - Test: `tests/test_nflverse.py`
 
-**Package note:** nflverse's Python bindings exist as both `nfl_data_py` (pandas) and the newer polars-native `nflreadpy`. Step 1 determines which is installed and available; the adapter's public interface is identical either way, and the tests exercise our normalization rather than the upstream package. Do not skip Step 1 — guessing wrong here wastes an hour.
+**Package note:** nflverse's Python bindings exist as both `nfl_data_py` (pandas) and the newer polars-native `nflreadpy`. Step 1 determines which is installed and available; the adapter's public interface is identical either way, and the tests exercise our normalization rather than the upstream package. Do not skip Step 1 — guessing wrong here wastes an hour. *(Resolved during execution: `nflreadpy` 0.1.5. All aliases below matched the real schema with no corrections needed.)*
+
+> **Corrections applied during code review — the reference code in Step 5 below is superseded.** Three defects in this plan's own sample code were caught in review and fixed in the committed implementation. Read `src/ffdraft/sources/nflverse.py` for the real version, not the block below:
+> 1. **`_resolve` returned `pl.lit(None)` when no alias matched**, silently emitting an all-null column. Since `add_fantasy_points` treats nulls as zero, an upstream rename of e.g. `passing_tds` would have silently zeroed every QB's touchdown scoring with no error. It now raises `ValueError`. This is the same silent-corruption failure mode called out for the ID crosswalk in Task 5 — it applies here too.
+> 2. **`_sum_parts` used a manual fold**, inconsistent with `pl.sum_horizontal` already adopted in `scoring.py`.
+> 3. **`load_raw`'s `try/except ImportError` wrapped the fetch call as well as the import**, so an `ImportError` raised inside `load_player_stats` would be misread as "package not installed" and mask the real error.
+>
+> The Step 3 tests were also insufficient: all six ran against a single fixture using first-choice column names, giving zero coverage of the alias-fallback logic this module exists to provide. Three tests were added covering alternate aliases, missing optional summed parts, and a missing required column raising.
 
 - [ ] **Step 1: Determine the available nflverse package**
 

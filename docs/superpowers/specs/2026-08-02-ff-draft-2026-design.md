@@ -135,4 +135,13 @@ Trade evaluation, in-season roster management, auction drafts, dynasty/keeper fo
 
 ## Open questions
 
-None blocking. ESPN cookie extraction and the 2026 live-draft endpoint behavior are both resolved during implementation.
+**K and DST scoring — must be resolved before Stage 2.** The league starts one kicker and one defense, so the season simulator has to put a number in both lineup slots every week. But `ScoringRules` has no kicking or defensive terms, and Stage 1's `FANTASY_POSITIONS` excludes DST entirely. The consequence, confirmed against real ingested data: **every kicker scores 0.0 fantasy points, and defenses have no data at all.**
+
+This follows from the out-of-scope decision above ("no modeling of K or DST beyond replacement level"), which is still the right call for *draft* purposes — these are last-round picks and streamed all season. But "beyond replacement level" still requires *a* replacement level, not zero. Stage 2 must pick one of:
+
+1. Assign both positions a constant weekly mean with historical variance, fitted from actual K and DST weekly scoring. Cheapest, and adequate given neither position is a draft decision worth optimizing.
+2. Implement full K and DST scoring rules and ingest their stat lines. More faithful, considerably more work, and it buys accuracy in the two slots where accuracy matters least.
+
+Option 1 is the likely answer, but it needs the owner's exact ESPN K and DST scoring settings to calibrate, since ESPN's defaults vary by league and were never confirmed for this one. **Ask before building Stage 2's season simulator.**
+
+Not blocking: ESPN cookie extraction and the 2026 live-draft endpoint behavior are both resolved during implementation.
