@@ -20,7 +20,7 @@
 
 **Why distributions and not projections.** The objective is championship probability, and 60% of this league makes the playoffs. Regular-season wins are therefore cheap, and the scarce thing is a deep playoff run — which rewards ceiling. A model built on expected points systematically undervalues the boom players who win brackets. Weekly fantasy scoring is right-skewed with fat tails; modeling it as normal around a mean throws away exactly the signal that matters here.
 
-**Why K and DST are now modeled properly.** The original spec deferred them to "replacement level," but the owner supplied exact scoring rules, and a league that *starts* both cannot leave those lineup slots empty in simulation. They remain out of scope as *draft decisions* — the optimizer should still take them last — but their weekly scores must be real numbers with real variance.
+**K and DST get different treatment, deliberately.** The original spec deferred both to "replacement level," but a league that *starts* both cannot leave those lineup slots empty in simulation. Kickers are modeled individually, because the owner supplied exact kicking rules and the stats are already sitting in `weekly_stats`. Defenses are not — see the next note. Both remain out of scope as *draft decisions*; the optimizer should still take them last.
 
 **DST is a single shared distribution, not a per-team model.** Owner decision, 2026-08-02: every team's defense draws from the *same* weekly distribution. Defensive scoring is largely luck, there is little to control at the draft, and it is not what this project is trying to answer. Since all ten teams get the same DST distribution, it contributes equal expected points to every roster and cancels out of head-to-head comparisons.
 
@@ -40,18 +40,16 @@ Fitting that distribution needs only a mean and spread for a typical starting de
 src/ffdraft/
   models/
     kicking.py        FG/PAT scoring rules + kicker weekly distributions
-    defense.py        team-defense scoring rules + DST weekly distributions
+    defense.py        one shared DST weekly distribution (no per-team model)
     distribution.py   per-player weekly points distributions
     availability.py   games-missed / injury model
     replacement.py    weekly waiver-wire replacement level by position
   sim/
     lineup.py         optimal weekly lineup from a roster
     season.py         14-week regular season + 6-team bracket -> champion
-  sources/
-    nflverse_team.py  team-game-level defensive stats (new ingest)
 tests/
   test_kicking.py test_defense.py test_distribution.py test_availability.py
-  test_replacement.py test_lineup.py test_season.py test_nflverse_team.py
+  test_replacement.py test_lineup.py test_season.py
 ```
 
 ---
