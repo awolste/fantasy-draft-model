@@ -6,6 +6,8 @@ another module, it is a bug.
 """
 
 from dataclasses import dataclass
+from types import MappingProxyType
+from typing import Final
 
 
 @dataclass(frozen=True)
@@ -24,31 +26,31 @@ class ScoringRules:
     two_pt: float = 2.0
 
 
-SCORING = ScoringRules()
+SCORING: Final = ScoringRules()
 
 # Starting lineup: 1 QB, 2 RB, 2 WR, 1 TE, 2 FLEX, 1 K, 1 DST = 10
-STARTERS: dict[str, int] = {
+STARTERS: Final = MappingProxyType({
     "QB": 1, "RB": 2, "WR": 2, "TE": 1, "FLEX": 2, "K": 1, "DST": 1,
-}
-FLEX_ELIGIBLE = frozenset({"RB", "WR", "TE"})
+})
+FLEX_ELIGIBLE: Final = frozenset({"RB", "WR", "TE"})
 
-ROSTER_SIZE = 18
-BENCH_SIZE = 8
-IR_SLOTS = 1
+ROSTER_SIZE: Final = 18
+BENCH_SIZE: Final = 8
+IR_SLOTS: Final = 1
 
-N_TEAMS = 10
-DRAFT_SLOT = 8
-DRAFT_ROUNDS = ROSTER_SIZE
+N_TEAMS: Final = 10
+DRAFT_SLOT: Final = 8
+DRAFT_ROUNDS: Final = ROSTER_SIZE
 
-REGULAR_SEASON_WEEKS = 14
-PLAYOFF_TEAMS = 6
-PLAYOFF_ROUNDS = 3
-PLAYOFF_BYES = 2
+REGULAR_SEASON_WEEKS: Final = 14
+PLAYOFF_TEAMS: Final = 6
+PLAYOFF_ROUNDS: Final = 3
+PLAYOFF_BYES: Final = 2
 
 # Seasons of this league's history available on ESPN.
-LEAGUE_SEASONS = tuple(range(2018, 2026))
+LEAGUE_SEASONS: Final = tuple(range(2018, 2026))
 # Seasons of NFL stats used to fit variance and role models.
-STATS_SEASONS = tuple(range(2015, 2026))
+STATS_SEASONS: Final = tuple(range(2015, 2026))
 
 
 def starting_slots_total() -> int:

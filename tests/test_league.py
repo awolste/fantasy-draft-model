@@ -1,3 +1,5 @@
+import pytest
+
 from ffdraft.league import (
     SCORING, STARTERS, FLEX_ELIGIBLE, ROSTER_SIZE, BENCH_SIZE,
     N_TEAMS, DRAFT_SLOT, REGULAR_SEASON_WEEKS,
@@ -40,3 +42,16 @@ def test_league_and_playoff_shape():
     assert PLAYOFF_TEAMS == 6
     assert PLAYOFF_ROUNDS == 3
     assert PLAYOFF_BYES == 2
+
+
+def test_draft_slot_is_within_league_size():
+    assert DRAFT_SLOT <= N_TEAMS
+
+
+def test_playoff_teams_do_not_exceed_league_size():
+    assert PLAYOFF_TEAMS <= N_TEAMS
+
+
+def test_starters_is_immutable():
+    with pytest.raises(TypeError):
+        STARTERS["FLEX"] = 3
