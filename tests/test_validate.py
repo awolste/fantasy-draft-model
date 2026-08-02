@@ -5,6 +5,7 @@ from ffdraft.league import N_TEAMS
 from ffdraft.validate import (
     ValidationError,
     check_draft_completeness,
+    check_exactly_one_champion,
     check_id_match_rate,
     check_season_coverage,
     collision_review_groups,
@@ -143,6 +144,38 @@ def test_check_season_coverage_raises_on_missing_season():
     df = pl.DataFrame({"season": [2018, 2019, 2021]})
     with pytest.raises(ValidationError, match="2020"):
         check_season_coverage(df, "test", (2018, 2019, 2020, 2021))
+
+
+# --- check_exactly_one_champion ----------------------------------------------
+
+
+def _results_df(champion_ranks: dict[int, list[int]]) -> pl.DataFrame:
+    """Build a league_results-shaped frame: season -> list of final_rank
+    values held by that season's teams."""
+    seasons: list[int] = []
+    ranks: list[int] = []
+    for season, rank_list in champion_ranks.items():
+        for rank in rank_list:
+            seasons.append(season)
+            ranks.append(rank)
+    return pl.DataFrame({"season": seasons, "final_rank": ranks})
+
+
+def test_check_exactly_one_champion_passes_on_valid_data():
+    df = _results_df({2018: [1, 2, 3], 2019: [1, 2, 3]})
+    check_exactly_one_champion(df, (2018, 2019))  # must not raise
+
+
+def test_check_exactly_one_champion_raises_on_two_champions():
+    df = _results_df({2018: [1, 1, 2], 2019: [1, 2, 3]})
+    with pytest.raises(ValidationError, match="2018"):
+        check_exactly_one_champion(df, (2018, 2019))
+
+
+def test_check_exactly_one_champion_raises_on_zero_champions():
+    df = _results_df({2018: [2, 3, 4], 2019: [1, 2, 3]})
+    with pytest.raises(ValidationError, match="2018"):
+        check_exactly_one_champion(df, (2018, 2019))
 
 
 # --- collision_review_groups -------------------------------------------------

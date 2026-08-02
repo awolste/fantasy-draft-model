@@ -132,6 +132,28 @@ def check_season_coverage(df: pl.DataFrame, label: str, expected: tuple[int, ...
         raise ValidationError(f"{label}: missing season(s) {missing}")
 
 
+# --- Requirement 6: exactly one champion per season -------------------------
+
+
+def check_exactly_one_champion(df: pl.DataFrame, seasons: tuple[int, ...]) -> None:
+    """Every season must have exactly one team with `final_rank == 1`.
+    Raises `ValidationError` naming the offending season and how many
+    champions it actually has (0 or >1)."""
+    champ_counts = (
+        df.filter(pl.col("final_rank") == 1)
+        .group_by("season")
+        .agg(pl.len().alias("n_champions"))
+    )
+    for season in seasons:
+        row = champ_counts.filter(pl.col("season") == season)
+        n = row["n_champions"][0] if row.height else 0
+        if n != 1:
+            raise ValidationError(
+                f"league_results season {season}: expected exactly 1 champion "
+                f"(final_rank == 1), found {n}"
+            )
+
+
 # --- Requirement 4: collision report ----------------------------------------
 
 
@@ -245,19 +267,7 @@ def report() -> None:
 
     # exactly one champion per season
     results = read("league_results")
-    champ_counts = (
-        results.filter(pl.col("final_rank") == 1)
-        .group_by("season")
-        .agg(pl.len().alias("n_champions"))
-    )
-    for season in LEAGUE_SEASONS:
-        row = champ_counts.filter(pl.col("season") == season)
-        n = row["n_champions"][0] if row.height else 0
-        if n != 1:
-            raise ValidationError(
-                f"league_results season {season}: expected exactly 1 champion "
-                f"(final_rank == 1), found {n}"
-            )
+    check_exactly_one_champion(results, LEAGUE_SEASONS)
     print(f"league_results: exactly one champion in each of {len(LEAGUE_SEASONS)} seasons")
 
     # rankings and ADP match rates
