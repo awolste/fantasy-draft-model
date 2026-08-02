@@ -59,7 +59,7 @@ draft/    the optimizer that consumes sim output
 ui/       cheat sheet (stage 1), live assistant (stage 2)
 ```
 
-**Stack:** Python, numpy + polars, SQLite plus parquet for storage, pytest, Streamlit for the live UI. Everything runs locally. No server, no hosting, nothing to maintain between seasons.
+**Stack:** Python, numpy + polars, parquet files for storage, pytest, Streamlit for the live UI. Everything runs locally. No server, no database, no hosting, nothing to maintain between seasons.
 
 ### data/
 
@@ -67,7 +67,12 @@ ui/       cheat sheet (stage 1), live assistant (stage 2)
 |---|---|---|
 | `espn_history.py` | ESPN v3 API, `leagueHistory` + `mDraftDetail` | 8 seasons of this league (2018–2025): every draft pick, weekly rosters and lineups, final standings, champions. Requires `espn_s2` and `SWID` cookies. |
 | `nfl_stats.py` | nflverse via `nfl_data_py` | Weekly raw stat lines, 2015–2025 |
-| `rankings.py` | FantasyPros ECR (scrape), ESPN projections (API), Sleeper ADP (API) | 2026 consensus rankings, projections, and two independent ADP sources |
+| `rankings.py` | FantasyPros ECR + consensus ADP (scrape), ESPN projections (API) | 2026 consensus rankings, projections, and ADP |
+| `ids.py` | nflverse ID table, Sleeper players API | Crosswalk between nflverse `gsis_id`, ESPN `playerId`, Sleeper ids, and FantasyPros names |
+
+Sleeper has no official public ADP endpoint; it is used for player ID crosswalking only. FantasyPros consensus ADP already aggregates multiple sites, so it serves as the ADP source.
+
+The ID crosswalk is called out as its own component because a mismatch there fails silently — it drops players from the pool or attaches projections to the wrong person, and every downstream number remains plausible while being wrong. It gets explicit tests and a match-rate threshold that raises rather than warns.
 
 Historical stats come from nflverse rather than a fantasy site because it supplies raw stat lines, letting us apply this league's exact scoring. It is also maintained and requires no scraping.
 
