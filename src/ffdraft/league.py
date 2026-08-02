@@ -30,6 +30,22 @@ class ScoringRules:
 
 SCORING: Final = ScoringRules()
 
+
+@dataclass(frozen=True)
+class KickingRules:
+    """League kicking scoring. FG 50-59 and 60+ are both 5 -- distance past
+    50 carries no extra value here, which is unusual and easy to get wrong."""
+
+    pat_made: float = 1.0
+    fg_0_39: float = 3.0
+    fg_40_49: float = 4.0
+    fg_50_59: float = 5.0
+    fg_60_plus: float = 5.0
+    fg_missed: float = -1.0
+
+
+KICKING: Final = KickingRules()
+
 # Starting lineup: 1 QB, 2 RB, 2 WR, 1 TE, 2 FLEX, 1 K, 1 DST = 10
 STARTERS: Final = MappingProxyType({
     "QB": 1, "RB": 2, "WR": 2, "TE": 1, "FLEX": 2, "K": 1, "DST": 1,
