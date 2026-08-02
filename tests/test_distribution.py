@@ -332,16 +332,48 @@ def test_kicker_bypasses_crosswalk_entirely(monkeypatch, tmp_path):
 # primarily on upper-tail fit") and it was previously never enforced by a
 # test -- a hand-run diagnostic reported a badly-inflated ratio (2.44
 # modeled vs 1.54 observed for QB) that no test caught. This test would
-# have failed loudly on that version: the gap was +58%, and the tolerance
-# below is 15%, roughly 3x the model's current largest residual gap
-# (~5%, TE/K) and nowhere near enough headroom to hide a mistake of that
-# size again.
+# have failed loudly on that version: the gap was +58%, several times over
+# even the loosest tolerance below.
+#
+# Which quantile is the fitted target vs an independent check matters here:
+# `_fit_gamma_shape` solves the Gamma shape to match the empirical
+# **p90**/median ratio directly (see its docstring). So a p90 assertion
+# alone is close to circular -- it mostly re-confirms that rank-anchoring,
+# zero-inflation, and tiering compose without distorting the ratio the fit
+# already targeted, which is real coverage but can't catch a wrong tail
+# *family*. p95 and p99 are NOT fit targets: nothing in the fitting
+# procedure sees them, so if Gamma were the wrong family, or the tail
+# diverged past what a single quantile match can fix, these would drift
+# while p90 stayed locked -- and only these two would catch it.
 #
 # Uses real `data/weekly_stats.parquet`/`rankings_2026`/`adp_history` (not
 # synthetic fixtures) because the whole point is checking the fit against
 # actual NFL history -- skipped rather than failed when that data hasn't
 # been ingested, consistent with this project's data/ being gitignored.
-CALIBRATION_TOLERANCE = 0.15  # relative error on the p90/median ratio
+#
+# Tolerances are chosen from the *observed* side's sampling noise, which is
+# the binding constraint (the modeled side is drawn from a closed-form
+# distribution at 500k samples/position and its own MC noise is
+# negligible by comparison). A 2000-resample bootstrap of
+# `observed_starter_quantiles`'s ratio90/95/99 over the real starter-cohort
+# data gave these standard errors (as a fraction of the ratio):
+#   p90: QB/RB/WR ~2%, TE/K ~3%   -> tightest, least noisy
+#   p95: ~2-3% for QB/RB/WR, ~3%  for TE/K
+#   p99: QB ~2.9%, K ~3.3%, WR ~3.1%, RB ~4.6%, TE ~5.5% (worst -- see below)
+# p99 is noisiest because it's estimated from very few order statistics:
+# with only 900-1900 starter-weeks per position, the top 1% is ~9-19 weeks
+# (TE has the fewest, 930 weeks -> ~9.3 informing p99, hence its 5.5% CV).
+#
+# Tolerance = roughly 6x the worst observed-side CV in that quantile's
+# group, which is comfortably tight (an actual family misspecification
+# should produce an error many times larger than sampling noise -- the
+# pre-fix bug was ~20-30x a typical CV) while not flagging normal
+# small-sample variation in a legitimately correct model:
+CALIBRATION_TOLERANCE = {
+    "ratio90": 0.15,  # ~2-3% observed CV -> ~6x headroom; also the fitted target
+    "ratio95": 0.20,  # ~2-3% observed CV -> ~7-10x headroom; independent check
+    "ratio99": 0.35,  # up to 5.5% observed CV (TE) -> ~6x headroom; independent check
+}
 
 _HAS_REAL_DATA = exists("weekly_stats") and exists("rankings_2026") and exists("adp_history")
 
@@ -363,11 +395,13 @@ def test_modeled_tail_matches_observed_starter_cohort():
     for position, top_n in STARTER_COHORT_TOP_N.items():
         obs = observed_by_pos[position]
         mod = modeled_by_pos[position]
-        rel_err_90 = abs(mod["ratio90"] - obs["ratio90"]) / obs["ratio90"]
-        if rel_err_90 >= CALIBRATION_TOLERANCE:
-            failures.append(
-                f"{position}: modeled p90/median={mod['ratio90']:.3f} vs observed "
-                f"{obs['ratio90']:.3f} (top-{top_n} starter cohort) -- "
-                f"{rel_err_90:.1%} off, exceeds {CALIBRATION_TOLERANCE:.0%} tolerance"
-            )
+        for ratio_key, tolerance in CALIBRATION_TOLERANCE.items():
+            rel_err = abs(mod[ratio_key] - obs[ratio_key]) / obs[ratio_key]
+            if rel_err >= tolerance:
+                failures.append(
+                    f"{position} {ratio_key}: modeled={mod[ratio_key]:.3f} vs observed "
+                    f"{obs[ratio_key]:.3f} (top-{top_n} starter cohort, "
+                    f"n_weeks={obs['n_weeks']}) -- {rel_err:.1%} off, "
+                    f"exceeds {tolerance:.0%} tolerance"
+                )
     assert not failures, "\n".join(failures)
