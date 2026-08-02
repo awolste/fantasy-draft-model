@@ -10,6 +10,7 @@ import polars as pl
 from ..league import STATS_SEASONS
 from ..scoring import add_fantasy_points
 from ..store import write
+from ._nflverse_compat import load_from_nflverse
 
 CANONICAL_COLUMNS = (
     "player_id", "player_name", "position", "team", "season", "week",
@@ -88,15 +89,10 @@ def normalize_weekly(raw: pl.DataFrame) -> pl.DataFrame:
 
 def load_raw(seasons: tuple[int, ...]) -> pl.DataFrame:
     """Fetch from whichever nflverse package is installed."""
-    try:
-        import nflreadpy as nfl
-    except ImportError:
-        import nfl_data_py
-
-        return pl.from_pandas(nfl_data_py.import_weekly_data(list(seasons)))
-
-    data = nfl.load_player_stats(seasons=list(seasons))
-    return data if isinstance(data, pl.DataFrame) else data.to_polars()
+    return load_from_nflverse(
+        lambda nfl: nfl.load_player_stats(seasons=list(seasons)),
+        lambda nfl_data_py: nfl_data_py.import_weekly_data(list(seasons)),
+    )
 
 
 def ingest(seasons: tuple[int, ...] = STATS_SEASONS) -> pl.DataFrame:

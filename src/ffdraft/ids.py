@@ -11,6 +11,7 @@ import re
 
 import polars as pl
 
+from .sources._nflverse_compat import load_from_nflverse
 from .store import write
 
 CROSSWALK_COLUMNS = ("gsis_id", "espn_id", "sleeper_id", "name", "position")
@@ -155,15 +156,10 @@ def _load_prepared_ids() -> pl.DataFrame:
     before collapsing collisions. Shared by `load_crosswalk` (which only
     needs the winners) and `ingest` (which also persists the losers).
     """
-    try:
-        import nflreadpy as nfl
-
-        raw = nfl.load_ff_playerids()
-        ids = raw if isinstance(raw, pl.DataFrame) else raw.to_polars()
-    except ImportError:
-        import nfl_data_py
-
-        ids = pl.from_pandas(nfl_data_py.import_ids())
+    ids = load_from_nflverse(
+        lambda nfl: nfl.load_ff_playerids(),
+        lambda nfl_data_py: nfl_data_py.import_ids(),
+    )
 
     ids = ids.select(
         pl.col("gsis_id"),
