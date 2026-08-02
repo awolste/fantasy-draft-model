@@ -65,7 +65,7 @@ ui/       cheat sheet (stage 1), live assistant (stage 2)
 
 | Module | Source | Provides |
 |---|---|---|
-| `espn_history.py` | ESPN v3 API, `leagueHistory` + `mDraftDetail` | 5 seasons of this league: every draft pick, weekly rosters and lineups, final standings, champions. Requires `espn_s2` and `SWID` cookies. |
+| `espn_history.py` | ESPN v3 API, `leagueHistory` + `mDraftDetail` | 8 seasons of this league (2018–2025): every draft pick, weekly rosters and lineups, final standings, champions. Requires `espn_s2` and `SWID` cookies. |
 | `nfl_stats.py` | nflverse via `nfl_data_py` | Weekly raw stat lines, 2015–2025 |
 | `rankings.py` | FantasyPros ECR (scrape), ESPN projections (API), Sleeper ADP (API) | 2026 consensus rankings, projections, and two independent ADP sources |
 
@@ -75,7 +75,9 @@ Historical stats come from nflverse rather than a fantasy site because it suppli
 
 **`player_model.py`** — a *weekly points distribution* per player, not a season projection. Mean anchored to consensus; distribution shape fitted from historical players in comparable roles. Weekly scoring is right-skewed with fat tails, and modeling it as normal around a mean understates precisely the boom outcomes that win playoff brackets. Includes an availability model, since games missed is among the largest real sources of variance and is commonly ignored.
 
-**`opponent_model.py`** — P(manager *m* drafts player *p* at pick *n*), fitted on five years of this league's actual picks against that year's ADP. Yields a per-manager reach tendency and positional bias over a global ADP-noise term. This is where the league history earns its place — considerably more than the champion rosters do.
+**`opponent_model.py`** — P(manager *m* drafts player *p* at pick *n*), fitted on eight years (2018–2025) of this league's actual picks against that year's ADP. Yields a per-manager reach tendency and positional bias over a global ADP-noise term. This is where the league history earns its place — considerably more than the champion rosters do.
+
+One league tendency is known in advance and serves as a model check: **defenses are drafted earlier here than consensus ADP suggests**, because 8-man benches leave room to stash them. The model should recover this from the data without being told. If it does not, the fit is suspect. The practical consequence is that skill-position players last longer in this league than generic ADP implies, so correct play is more patient than a stock cheat sheet would advise.
 
 **`replacement_model.py`** — realistic weekly waiver availability at this league's roster depth, derived from historical weekly data.
 
@@ -101,9 +103,9 @@ Manual pick entry is the **primary** path for the live assistant. ESPN's live dr
 
 ## Validation
 
-**Backtest against 2025.** Hold out the 2025 season entirely. Every model is fitted on data through 2024 only: the player and variance models on nflverse seasons 2015–2024, the opponent model on this league's 2021–2024 drafts (four of the five available seasons, since 2025 is the holdout). Run the engine against 2025's actual ADP from slot 8, then score the resulting roster against real 2025 weekly results. Compare to three baselines: best-available-by-ADP, best-available-by-consensus-ranking, and random-but-positionally-legal.
+**Backtest against 2025.** Hold out the 2025 season entirely. Every model is fitted on data through 2024 only: the player and variance models on nflverse seasons 2015–2024, the opponent model on this league's 2018–2024 drafts (seven of the eight available seasons, since 2025 is the holdout). Run the engine against 2025's actual ADP from slot 8, then score the resulting roster against real 2025 weekly results. Compare to three baselines: best-available-by-ADP, best-available-by-consensus-ranking, and random-but-positionally-legal.
 
-Note that the opponent model is the component most weakened by the holdout, since it loses a quarter of its already-small training set. A weak backtest result for the full engine should be checked against a variant using all five seasons of draft history before concluding the approach fails.
+**Report results broken down by round**, not only in aggregate. The expectation is that rounds 1–2 largely reproduce consensus — at pick 8 there are only a few defensible choices and the tool should agree with them — while the measurable edge concentrates in the round 1–3 structural decision and in rounds 3–8, where survival probability and positional scarcity diverge most from raw ADP. If the aggregate edge turns out to come from somewhere else entirely, that is worth understanding before trusting it.
 
 **If the engine does not beat ADP-following, it does not work.** This gate exists so that failure surfaces in July rather than December. The expected honest result is a modest edge of a few percentage points of championship probability. A large apparent edge should be treated as evidence of overfitting, not success.
 
