@@ -50,20 +50,53 @@ def sanitize(payload: dict) -> dict:
             team["location"] = "Team"
         if "nickname" in team:
             team["nickname"] = str(index)
+        # abbrev is user-chosen and in practice contains surname fragments.
+        if "abbrev" in team:
+            team["abbrev"] = f"T{index:02d}"
         team.pop("logo", None)
+
+    # The league's own display name identifies the group and often a real place.
+    settings = data.get("settings")
+    if isinstance(settings, dict) and "name" in settings:
+        settings["name"] = "Test League"
 
     return data
 
 
 def assert_clean(data: dict, forbidden: list[str]) -> None:
-    """Fail loudly if any known-sensitive string survived."""
+    """Fail loudly if any known-sensitive value survived.
+
+    Substring search only runs on strings longer than 3 characters, because
+    short values like a two-letter team abbreviation match everywhere by
+    coincidence. Short fields are verified structurally instead: every one
+    must equal the placeholder this script would have written.
+    """
     text = json.dumps(data)
-    leaked = [value for value in forbidden if value and value in text]
+
+    leaked = [v for v in forbidden if v and len(v) > 3 and v in text]
     if leaked:
         raise SystemExit(f"Sanitization failed; {len(leaked)} sensitive value(s) still present.")
+
     remaining = [g for g in GUID_PATTERN.findall(text) if not g.endswith("-000000000000}")]
     if remaining:
         raise SystemExit(f"Sanitization failed; unreplaced GUIDs remain: {len(remaining)}")
+
+    for index, team in enumerate(data.get("teams", []), start=1):
+        for field, expected in (
+            ("abbrev", f"T{index:02d}"),
+            ("name", f"Team {index}"),
+            ("nickname", str(index)),
+        ):
+            if field in team and team[field] != expected:
+                raise SystemExit(f"Sanitization failed; teams[{index}].{field} not replaced.")
+
+    settings = data.get("settings")
+    if isinstance(settings, dict) and settings.get("name") not in (None, "Test League"):
+        raise SystemExit("Sanitization failed; settings.name not replaced.")
+
+    for index, member in enumerate(data.get("members", []), start=1):
+        if member.get("lastName") != "Anonymized":
+            raise SystemExit(f"Sanitization failed; members[{index}] not replaced.")
 
 
 def main() -> None:
@@ -75,7 +108,8 @@ def main() -> None:
     for member in raw.get("members", []):
         forbidden += [member.get("firstName"), member.get("lastName"), member.get("displayName")]
     for team in raw.get("teams", []):
-        forbidden += [team.get("name"), team.get("nickname")]
+        forbidden += [team.get("name"), team.get("nickname"), team.get("abbrev")]
+    forbidden.append((raw.get("settings") or {}).get("name"))
 
     clean = sanitize(raw)
     assert_clean(clean, [f for f in forbidden if f and len(f) > 3])
