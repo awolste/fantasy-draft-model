@@ -90,18 +90,21 @@ def _dedupe_by_name_position(df: pl.DataFrame) -> pl.DataFrame:
          NFL game (nflverse only assigns gsis_id on roster appearance), so
          it's a good proxy for relevance when draft_year ties or is missing.
       3. Non-null `espn_id` -- same idea, weaker signal.
-      4. `gsis_id`, then `espn_id`, then `name` ascending -- pure tiebreak so
-         the result is reproducible across runs regardless of upstream row
-         order, rather than depending on whatever order the source data
-         happens to arrive in.
+      4. `gsis_id`, then `espn_id`, then `name`, then `sleeper_id` ascending --
+         pure tiebreak so the result is reproducible across runs regardless
+         of upstream row order or polars sort stability, rather than
+         depending on whatever order the source data happens to arrive in.
     """
     ranked = df.with_columns(
         pl.col("draft_year").fill_null(-1).alias("_draft_rank"),
         pl.col("gsis_id").is_not_null().alias("_has_gsis"),
         pl.col("espn_id").is_not_null().alias("_has_espn"),
     ).sort(
-        ["_key", "position", "_draft_rank", "_has_gsis", "_has_espn", "gsis_id", "espn_id", "name"],
-        descending=[False, False, True, True, True, False, False, False],
+        [
+            "_key", "position", "_draft_rank", "_has_gsis", "_has_espn",
+            "gsis_id", "espn_id", "name", "sleeper_id",
+        ],
+        descending=[False, False, True, True, True, False, False, False, False],
         nulls_last=True,
     )
     return ranked.unique(

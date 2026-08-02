@@ -1,7 +1,13 @@
 import polars as pl
 import pytest
 
-from ffdraft.ids import CROSSWALK_COLUMNS, match_by_name, normalize_name
+from ffdraft.ids import (
+    CROSSWALK_COLUMNS,
+    _dedupe_by_name_position,
+    _with_key,
+    match_by_name,
+    normalize_name,
+)
 
 CROSSWALK = pl.DataFrame({
     "gsis_id": ["00-0034796", "00-0036322", "00-0033873"],
@@ -81,6 +87,60 @@ def test_match_by_name_resolves_collision_to_intended_player_when_deduped():
     assert out.height == 1
     assert out["gsis_id"].to_list() == ["00-0039849"]
     assert out["espn_id"].to_list() == [4432708]
+
+
+def _deduped(raw: pl.DataFrame) -> pl.DataFrame:
+    """Run raw crosswalk-shaped rows through the real dedupe pipeline."""
+    return _dedupe_by_name_position(_with_key(raw))
+
+
+def test_dedupe_by_name_position_prefers_higher_draft_year_over_gsis_id():
+    """draft_year outranks having a gsis_id. Deliberately give the OLDER row
+    the non-null gsis_id: if the priority order were ever flipped (gsis_id
+    checked before draft_year), this test would catch it by picking the
+    wrong (older, likely-retired) player."""
+    raw = pl.DataFrame({
+        "gsis_id": ["00-OLDGUY", None],
+        "espn_id": [None, None],
+        "sleeper_id": [None, None],
+        "name": ["Test Player", "Test Player Jr."],
+        "position": ["WR", "WR"],
+        "draft_year": [1996, 2024],
+    })
+    out = _deduped(raw)
+    assert out.height == 1
+    assert out["draft_year"].to_list() == [2024]
+    assert out["gsis_id"].to_list() == [None]
+
+
+def test_dedupe_by_name_position_breaks_draft_year_tie_with_gsis_id():
+    """When draft_year ties, the row with a real gsis_id wins."""
+    raw = pl.DataFrame({
+        "gsis_id": [None, "00-REALGUY"],
+        "espn_id": [None, None],
+        "sleeper_id": [None, None],
+        "name": ["Test Player3", "Test Player3"],
+        "position": ["WR", "WR"],
+        "draft_year": [2020, 2020],
+    })
+    out = _deduped(raw)
+    assert out.height == 1
+    assert out["gsis_id"].to_list() == ["00-REALGUY"]
+
+
+def test_dedupe_by_name_position_breaks_gsis_id_tie_with_espn_id():
+    """When both draft_year and gsis_id (both null) tie, espn_id breaks it."""
+    raw = pl.DataFrame({
+        "gsis_id": [None, None],
+        "espn_id": [None, 1234],
+        "sleeper_id": [None, None],
+        "name": ["Test Player4", "Test Player4"],
+        "position": ["WR", "WR"],
+        "draft_year": [2020, 2020],
+    })
+    out = _deduped(raw)
+    assert out.height == 1
+    assert out["espn_id"].to_list() == [1234]
 
 
 def test_match_by_name_output_height_matches_input_height():
