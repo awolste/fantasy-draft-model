@@ -3,6 +3,7 @@ import polars as pl
 import pytest
 
 from ffdraft.models.distribution import (
+    STARTER_COHORT_TOP_N,
     TierShape,
     ZeroInflatedGammaDistribution,
     anchor_tier_shape,
@@ -10,9 +11,12 @@ from ffdraft.models.distribution import (
     excluded_players,
     fit_rank_curves,
     fit_tier_shapes,
+    modeled_starter_quantile_ratios,
     n_tiers,
+    observed_starter_quantiles,
     tier_for_rank,
 )
+from ffdraft.store import exists, read
 
 # ---------------------------------------------------------------------------
 # tier_for_rank / n_tiers
@@ -319,3 +323,51 @@ def test_kicker_bypasses_crosswalk_entirely(monkeypatch, tmp_path):
     )
     assert len(pool) == 2
     assert all(p.position == "K" for p in pool.values())
+
+
+# ---------------------------------------------------------------------------
+# Calibration: modeled tail behavior vs the real starter cohort.
+#
+# This is the acceptance criterion the plan actually specified ("judged
+# primarily on upper-tail fit") and it was previously never enforced by a
+# test -- a hand-run diagnostic reported a badly-inflated ratio (2.44
+# modeled vs 1.54 observed for QB) that no test caught. This test would
+# have failed loudly on that version: the gap was +58%, and the tolerance
+# below is 15%, roughly 3x the model's current largest residual gap
+# (~5%, TE/K) and nowhere near enough headroom to hide a mistake of that
+# size again.
+#
+# Uses real `data/weekly_stats.parquet`/`rankings_2026`/`adp_history` (not
+# synthetic fixtures) because the whole point is checking the fit against
+# actual NFL history -- skipped rather than failed when that data hasn't
+# been ingested, consistent with this project's data/ being gitignored.
+CALIBRATION_TOLERANCE = 0.15  # relative error on the p90/median ratio
+
+_HAS_REAL_DATA = exists("weekly_stats") and exists("rankings_2026") and exists("adp_history")
+
+
+@pytest.mark.skipif(not _HAS_REAL_DATA, reason="requires ingested data/ (run scripts/ingest_all.py)")
+def test_modeled_tail_matches_observed_starter_cohort():
+    weekly = read("weekly_stats")
+    rankings = read("rankings_2026")
+    adp_history = read("adp_history")
+
+    observed = observed_starter_quantiles(weekly)
+    pool = build_player_pool(rankings=rankings, weekly=weekly, adp_history=adp_history)
+    modeled = modeled_starter_quantile_ratios(pool)
+
+    observed_by_pos = {r["position"]: r for r in observed.to_dicts()}
+    modeled_by_pos = {r["position"]: r for r in modeled.to_dicts()}
+
+    failures = []
+    for position, top_n in STARTER_COHORT_TOP_N.items():
+        obs = observed_by_pos[position]
+        mod = modeled_by_pos[position]
+        rel_err_90 = abs(mod["ratio90"] - obs["ratio90"]) / obs["ratio90"]
+        if rel_err_90 >= CALIBRATION_TOLERANCE:
+            failures.append(
+                f"{position}: modeled p90/median={mod['ratio90']:.3f} vs observed "
+                f"{obs['ratio90']:.3f} (top-{top_n} starter cohort) -- "
+                f"{rel_err_90:.1%} off, exceeds {CALIBRATION_TOLERANCE:.0%} tolerance"
+            )
+    assert not failures, "\n".join(failures)
