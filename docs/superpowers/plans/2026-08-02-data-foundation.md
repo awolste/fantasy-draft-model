@@ -1583,6 +1583,14 @@ This is the task that catches the failure mode described at the top of the plan:
 >
 > Measure instead whether the row **matched a crosswalk entry at all** — i.e. resolved to any of `gsis_id`, `espn_id`, or `sleeper_id` — and report per-ID coverage separately as diagnostics rather than as the pass/fail gate. Defenses also need excluding before the check, as noted in Task 10 Step 2.
 
+> **Additional requirement from Task 5 review — report collapsed name collisions.** `normalize_name` strips generational suffixes, so "Marvin Harrison Jr." and "Marvin Harrison Sr." produce the same key. `_dedupe_by_name_position` in `ids.py` resolves each such collision by keeping one row (highest `draft_year` wins) and discarding the rest — 554 collisions in the real crosswalk, 363 of them at fantasy-relevant positions.
+>
+> That rule was verified empirically correct against current data: none of the 363 involve two plausibly-active players, and `draft_year` discriminates every case, including the close ones (Isaiah Williams 2010 vs 2024; Kyle Williams 2010 vs 2025). But the resolution is currently invisible — nothing reports *what* was collapsed, so a future season where two active players genuinely share a name and position would silently drop one, which is exactly the failure mode this project guards against everywhere else.
+>
+> `validate.py` should therefore report every collapsed fantasy-relevant collision group: winner and losers with `name`, `draft_year`, and which IDs each carried, and flag for manual review any group whose two highest `draft_year` values are within ~10 years. Make this **loud but non-blocking** — a hard failure would halt all ingestion on a false positive, and the correct response is a human glance, not a stop. This needs `_dedupe_by_name_position` to expose the discarded rows (return them, or persist them as a `crosswalk_collisions` dataset) rather than dropping them silently. Keep the report formatting in `validate.py`, not in `ids.py`.
+>
+> Also noted during that investigation: **`db_season` is useless as a recency signal** — it is `2026` for every row, i.e. a data-snapshot date, not last-active-season. `team` is also unreliable (retired players retain a stale team). `draft_year` is the only trustworthy recency field, with 101 nulls out of 12,470 rows.
+
 - [ ] **Step 1: Write the failing test**
 
 Create `tests/test_validate.py`:
