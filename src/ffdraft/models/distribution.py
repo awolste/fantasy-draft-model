@@ -1,0 +1,557 @@
+"""Per-player weekly fantasy-points distributions, anchored to 2026 consensus.
+
+Two independent things get fitted from history and then combined:
+
+- **Shape** (`TierShape`): how spread out and skewed a role tier's weekly
+  scoring is -- e.g. a WR1's week-to-week profile is genuinely different
+  from a WR5's, not just a scaled copy. Fitted once per (position, tier)
+  from 2015-2025 `weekly_stats`, cached to disk.
+- **Mean** (the rank -> points curve): what a specific 2026 player, at a
+  specific *ordinal* rank, is expected to average per week. Fitted once per
+  position from `adp_history` joined to actual season performance, cached
+  to disk.
+
+`build_player_pool()` combines the two: every 2026 player gets the shape of
+their (position, tier) and a mean read off their position's rank curve, via
+`anchor_tier_shape`, which solves for the one free scale parameter so the
+mixture's expectation matches the anchored mean exactly.
+
+See `models/base.py` for the `WeeklyDistribution` Protocol every
+distribution here satisfies, including the flatten-weeks-into-one-`size`
+performance note that Task 7's simulator depends on.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+import polars as pl
+from scipy import optimize, stats
+
+from ..ids import load_crosswalk, match_by_name, normalize_name
+from ..store import exists, read, write
+from .base import WeeklyDistribution
+from .defense import dst_distribution
+
+# ---------------------------------------------------------------------------
+# Step 2: role tiers
+#
+# Tier boundaries follow the shape of a fantasy roster in this exact league
+# (10 teams, 1 QB / 2 RB / 2 WR / 1 TE / 2 FLEX): RB and WR both feed the
+# FLEX slots, so "starter-relevant" extends well past the position's own
+# starting-slot count -- roughly 2 dedicated + a share of 2 FLEX per team,
+# i.e. up to ~30-40 RBs/WRs are plausibly rostered as starters across the
+# league in a given week, while QB (1 slot, no FLEX) and TE (1 slot + FLEX
+# share) taper off faster. Breaks are round-number approximations of that
+# roster math, not a precise formula -- the point is coarse bands that
+# separate "clear starter" from "streamer" from "deep bench/waiver," which
+# is exactly where Step 1's tier-level fits showed the shape genuinely
+# changing (see the fit comparison in the task report).
+TIER_BREAKS: dict[str, tuple[int, ...]] = {
+    "QB": (12, 24),
+    "RB": (12, 24, 36),
+    "WR": (12, 24, 36),
+    "TE": (12, 24),
+    "K": (12,),
+}
+
+MIN_GAMES_FOR_SEASON_RANK = 4  # exclude injury-shortened/cameo seasons from tiering
+MIN_NEGATIVE_SAMPLES_FOR_OWN_FIT = 10  # else fall back to the position-wide negative fit
+
+
+def tier_for_rank(position: str, position_rank: int) -> int:
+    """1-indexed tier: 1 = best tier (e.g. QB1-12), increasing = deeper."""
+    breaks = TIER_BREAKS[position]
+    for i, b in enumerate(breaks, start=1):
+        if position_rank <= b:
+            return i
+    return len(breaks) + 1
+
+
+def n_tiers(position: str) -> int:
+    return len(TIER_BREAKS[position]) + 1
+
+
+# ---------------------------------------------------------------------------
+# Step 1/2: fitted shape per (position, tier)
+
+
+@dataclass(frozen=True)
+class TierShape:
+    """Mean-independent weekly-scoring shape for one (position, tier).
+
+    `p_negative` and `p_zero` are the fitted probabilities of a bust
+    (negative) week and an exact-zero (inactive/no-stats) week. The
+    remaining probability mass is a Gamma fit (`gamma_shape`, MLE with
+    location fixed at 0) to the positive weeks -- `gamma_shape` alone is
+    scale-free and captures the tier's relative skew/tail weight;
+    `anchor_tier_shape` solves for the scale that hits a target mean.
+    `neg_shape`/`neg_scale` are a Gamma fit to the *magnitude* of negative
+    weeks (sampled and negated), letting genuinely bad weeks go below zero
+    rather than collapsing them into the zero mass.
+    """
+
+    position: str
+    tier: int
+    p_negative: float
+    p_zero: float
+    gamma_shape: float
+    neg_shape: float
+    neg_scale: float
+    n_weeks: int
+
+    @property
+    def neg_mean_magnitude(self) -> float:
+        return self.neg_shape * self.neg_scale
+
+
+def _fit_gamma_shape(positive_values: np.ndarray) -> float:
+    shape, _loc, _scale = stats.gamma.fit(positive_values, floc=0)
+    return float(shape)
+
+
+def _fit_negative_gamma(negative_values: np.ndarray) -> tuple[float, float]:
+    magnitudes = -negative_values
+    shape, _loc, scale = stats.gamma.fit(magnitudes, floc=0)
+    return float(shape), float(scale)
+
+
+def _season_position_rank(weekly: pl.DataFrame) -> pl.DataFrame:
+    """Rank each player's season by their own average points, within
+    (season, position). Basis for Step 2's tiering -- "that season's finish"
+    rather than preseason rank, since it is directly available from
+    `weekly_stats` with no extra join/matching noise, and captures who
+    actually *played like* a WR1 that year regardless of preseason hype."""
+    season_avg = (
+        weekly.group_by(["season", "position", "player_id"])
+        .agg(pl.col("fantasy_points").mean().alias("season_avg"), pl.len().alias("games"))
+        .filter(pl.col("games") >= MIN_GAMES_FOR_SEASON_RANK)
+    )
+    return season_avg.with_columns(
+        pl.col("season_avg")
+        .rank(method="ordinal", descending=True)
+        .over(["season", "position"])
+        .alias("season_rank")
+    )
+
+
+def fit_tier_shapes(weekly: pl.DataFrame) -> pl.DataFrame:
+    """Fit `TierShape` for every (position, tier) with enough data.
+
+    Returns a flat parameter table (not `TierShape` objects) so it can be
+    persisted directly.
+    """
+    ranked = _season_position_rank(weekly)
+    joined = weekly.join(
+        ranked.select(["season", "position", "player_id", "season_rank"]),
+        on=["season", "position", "player_id"],
+        how="inner",
+    )
+
+    rows = []
+    for position in TIER_BREAKS:
+        pos_all = joined.filter(pl.col("position") == position)
+        all_x = pos_all["fantasy_points"].to_numpy()
+        fallback_neg = None
+        if (all_x < 0).sum() >= MIN_NEGATIVE_SAMPLES_FOR_OWN_FIT:
+            fallback_neg = _fit_negative_gamma(all_x[all_x < 0])
+
+        pos_all = pos_all.with_columns(
+            pl.col("season_rank")
+            .map_elements(lambda r, p=position: tier_for_rank(p, r), return_dtype=pl.Int64)
+            .alias("tier")
+        )
+        for tier in range(1, n_tiers(position) + 1):
+            x = pos_all.filter(pl.col("tier") == tier)["fantasy_points"].to_numpy()
+            if len(x) < 30:
+                raise ValueError(
+                    f"Only {len(x)} weeks for {position} tier {tier} -- too few to fit "
+                    f"a stable shape. Check TIER_BREAKS or the historical data range."
+                )
+            p_negative = float((x < 0).mean())
+            p_zero = float((x == 0).mean())
+            positive = x[x > 0]
+            if len(positive) < 20:
+                raise ValueError(
+                    f"Only {len(positive)} positive weeks for {position} tier {tier} -- "
+                    f"cannot fit a Gamma shape reliably."
+                )
+            gamma_shape = _fit_gamma_shape(positive)
+
+            negative = x[x < 0]
+            if len(negative) >= MIN_NEGATIVE_SAMPLES_FOR_OWN_FIT:
+                neg_shape, neg_scale = _fit_negative_gamma(negative)
+            elif fallback_neg is not None:
+                neg_shape, neg_scale = fallback_neg
+            else:
+                # p_negative will be ~0 in this branch (too few negative
+                # weeks position-wide to fit anything), so these values are
+                # essentially unused -- placeholders to keep the dataclass
+                # well-formed.
+                neg_shape, neg_scale = 1.0, 0.5
+
+            rows.append(
+                {
+                    "position": position,
+                    "tier": tier,
+                    "p_negative": p_negative,
+                    "p_zero": p_zero,
+                    "gamma_shape": gamma_shape,
+                    "neg_shape": neg_shape,
+                    "neg_scale": neg_scale,
+                    "n_weeks": len(x),
+                }
+            )
+    return pl.DataFrame(rows)
+
+
+def load_or_fit_tier_shapes(weekly: pl.DataFrame, force_refit: bool = False) -> pl.DataFrame:
+    if not force_refit and exists("distribution_tier_shapes"):
+        return read("distribution_tier_shapes")
+    table = fit_tier_shapes(weekly)
+    write("distribution_tier_shapes", table)
+    return table
+
+
+def tier_shape_from_row(row: dict) -> TierShape:
+    return TierShape(
+        position=row["position"],
+        tier=row["tier"],
+        p_negative=row["p_negative"],
+        p_zero=row["p_zero"],
+        gamma_shape=row["gamma_shape"],
+        neg_shape=row["neg_shape"],
+        neg_scale=row["neg_scale"],
+        n_weeks=row["n_weeks"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Step 3: rank -> weekly-mean curve, per position
+
+
+def _decay_curve(rank: np.ndarray, a: float, b: float, c: float) -> np.ndarray:
+    """a * rank^-b + c: steeply decreasing for small rank, flattening to a
+    floor `c` as rank grows -- the shape Step 3 asks for."""
+    return a * np.power(rank, -b) + c
+
+
+@dataclass(frozen=True)
+class RankCurve:
+    position: str
+    a: float
+    b: float
+    c: float
+    n_players: int
+
+    def mean_for_rank(self, position_rank: int) -> float:
+        return float(_decay_curve(np.array([position_rank], dtype=float), self.a, self.b, self.c)[0])
+
+
+def fit_rank_curves(adp_history: pl.DataFrame, weekly: pl.DataFrame) -> pl.DataFrame:
+    """For each past season (`adp_history`, 2018-2024), rank players within
+    position by preseason ADP, join to their actual that-season per-game
+    average from `weekly_stats`, and fit `a*rank^-b + c` per position via
+    nonlinear least squares.
+
+    ADP (not FantasyPros ECR) is used as the preseason signal because it is
+    the only *historical, multi-season* ordinal ranking in this dataset --
+    `rankings_2026` is 2026-only and has nothing to regress against.
+    """
+    adp = adp_history.with_columns(
+        pl.col("name").map_elements(normalize_name, return_dtype=pl.String).alias("_key")
+    )
+    adp = adp.with_columns(
+        pl.col("adp").rank(method="ordinal").over(["season", "position"]).alias("pos_rank")
+    )
+
+    season_avg = (
+        weekly.group_by(["season", "position", "player_name"])
+        .agg(pl.col("fantasy_points").mean().alias("avg_pts"), pl.len().alias("games"))
+        .filter(pl.col("games") >= 2)
+    )
+    season_avg = season_avg.with_columns(
+        pl.col("player_name").map_elements(normalize_name, return_dtype=pl.String).alias("_key")
+    )
+
+    joined = adp.join(
+        season_avg.select(["season", "position", "_key", "avg_pts"]),
+        on=["season", "position", "_key"],
+        how="inner",
+    )
+
+    rows = []
+    for position in TIER_BREAKS:
+        d = joined.filter(pl.col("position") == position)
+        r = d["pos_rank"].to_numpy().astype(float)
+        y = d["avg_pts"].to_numpy().astype(float)
+        if len(r) < 20:
+            raise ValueError(
+                f"Only {len(r)} matched (adp, season-performance) pairs for {position} -- "
+                f"too few to fit a rank curve."
+            )
+        p0 = [max(y.max(), 1.0), 0.5, max(float(y.min()), 0.5)]
+        popt, _ = optimize.curve_fit(
+            _decay_curve, r, y, p0=p0, bounds=([0, 0.01, 0], [200, 5, 50]), maxfev=20000
+        )
+        a, b, c = (float(v) for v in popt)
+        rows.append({"position": position, "a": a, "b": b, "c": c, "n_players": len(r)})
+    return pl.DataFrame(rows)
+
+
+def load_or_fit_rank_curves(
+    adp_history: pl.DataFrame, weekly: pl.DataFrame, force_refit: bool = False
+) -> pl.DataFrame:
+    if not force_refit and exists("distribution_rank_curves"):
+        return read("distribution_rank_curves")
+    table = fit_rank_curves(adp_history, weekly)
+    write("distribution_rank_curves", table)
+    return table
+
+
+def rank_curve_from_row(row: dict) -> RankCurve:
+    return RankCurve(
+        position=row["position"], a=row["a"], b=row["b"], c=row["c"], n_players=row["n_players"]
+    )
+
+
+# ---------------------------------------------------------------------------
+# The distribution itself
+
+
+@dataclass(frozen=True)
+class ZeroInflatedGammaDistribution:
+    """A mean-anchored, tier-shaped weekly points distribution.
+
+    Three regimes, drawn each call from one shared uniform draw so the
+    probabilities partition correctly:
+      - negative (probability `p_negative`): magnitude ~ Gamma(neg_shape,
+        neg_scale), negated -- lets genuinely bad weeks (INT-and-fumble
+        QB weeks, a lost fumble with no yards) go below zero.
+      - exact zero (probability `p_zero`): inactive/no-stats weeks.
+      - positive (remaining probability): Gamma(gamma_shape, gamma_scale).
+
+    `gamma_scale` is the only parameter not taken directly from the tier's
+    fitted shape -- it is solved (see `anchor_tier_shape`) so this
+    distribution's `mean` equals a specific 2026 player's rank-curve
+    anchor, while `gamma_shape`/`p_negative`/`p_zero`/`neg_*` stay fixed at
+    the tier's fitted values. That split is the whole point: two players
+    with the same mean but different tiers get different `gamma_shape` (and
+    different `p_zero`), hence different tails.
+    """
+
+    mean: float
+    p_negative: float
+    p_zero: float
+    gamma_shape: float
+    gamma_scale: float
+    neg_shape: float
+    neg_scale: float
+
+    def sample(self, rng: np.random.Generator, size: int) -> np.ndarray:
+        u = rng.random(size)
+        out = np.zeros(size, dtype=float)
+        neg_mask = u < self.p_negative
+        zero_mask = (~neg_mask) & (u < self.p_negative + self.p_zero)
+        pos_mask = ~(neg_mask | zero_mask)
+
+        n_neg = int(neg_mask.sum())
+        n_pos = int(pos_mask.sum())
+        if n_neg:
+            out[neg_mask] = -rng.gamma(self.neg_shape, self.neg_scale, size=n_neg)
+        if n_pos:
+            out[pos_mask] = rng.gamma(self.gamma_shape, self.gamma_scale, size=n_pos)
+        return out
+
+
+MIN_GAMMA_SCALE = 1e-3
+
+
+def anchor_tier_shape(shape: TierShape, target_mean: float) -> ZeroInflatedGammaDistribution:
+    """Build a concrete distribution: `shape`'s fixed parameters, plus a
+    Gamma scale solved so E[X] == target_mean.
+
+    E[X] = p_negative * (-neg_mean_magnitude) + p_positive * (gamma_shape *
+    gamma_scale). Everything except gamma_scale is fixed by `shape`, so this
+    is one linear equation in gamma_scale.
+    """
+    p_positive = 1.0 - shape.p_negative - shape.p_zero
+    if p_positive <= 0:
+        raise ValueError(f"{shape.position} tier {shape.tier} has no positive-week mass to anchor")
+    numerator = target_mean + shape.p_negative * shape.neg_mean_magnitude
+    gamma_scale = numerator / (p_positive * shape.gamma_shape)
+    gamma_scale = max(gamma_scale, MIN_GAMMA_SCALE)
+    return ZeroInflatedGammaDistribution(
+        mean=target_mean,
+        p_negative=shape.p_negative,
+        p_zero=shape.p_zero,
+        gamma_shape=shape.gamma_shape,
+        gamma_scale=gamma_scale,
+        neg_shape=shape.neg_shape,
+        neg_scale=shape.neg_scale,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Step 5: public pool interface
+
+
+@dataclass(frozen=True)
+class PlayerDistribution:
+    """One draftable 2026 player: identity plus a sampleable distribution."""
+
+    player_id: str
+    name: str
+    position: str
+    rank: int
+    tier: int | None  # None for DST, which has no tiering
+    distribution: WeeklyDistribution
+
+
+SKILL_POSITIONS = ("QB", "RB", "WR", "TE")
+
+
+def _player_id_from_crosswalk_row(row: dict) -> str | None:
+    if row.get("gsis_id"):
+        return row["gsis_id"]
+    if row.get("espn_id"):
+        return f"espn_{row['espn_id']}"
+    if row.get("sleeper_id"):
+        return f"sleeper_{row['sleeper_id']}"
+    return None
+
+
+def build_player_pool(
+    rankings: pl.DataFrame | None = None,
+    weekly: pl.DataFrame | None = None,
+    adp_history: pl.DataFrame | None = None,
+    crosswalk: pl.DataFrame | None = None,
+    force_refit: bool = False,
+) -> dict[str, PlayerDistribution]:
+    """Build the draftable 2026 player pool.
+
+    Every skill-position (QB/RB/WR/TE) player is matched to the ID
+    crosswalk by name; unmatched players are excluded and reported (never
+    silently defaulted). Kickers bypass ID matching entirely -- the
+    crosswalk uses "PK" where every other source in this project uses "K",
+    so kickers match at ~0% -- and are assigned a distribution by rank
+    directly. Defenses use the single shared `dst_distribution()` for every
+    team, per the Task 2 owner decision.
+
+    `rankings`/`weekly`/`adp_history`/`crosswalk` default to this project's
+    persisted datasets (`store.read` / `ids.load_crosswalk`) so this can be
+    called with no arguments in normal use; the parameters exist so tests
+    (and any future backtest against a different season) can inject
+    synthetic or historical data instead.
+    """
+    if rankings is None:
+        rankings = read("rankings_2026")
+    if weekly is None:
+        weekly = read("weekly_stats")
+    if adp_history is None:
+        adp_history = read("adp_history")
+    if crosswalk is None:
+        crosswalk = load_crosswalk()
+
+    tier_shapes = load_or_fit_tier_shapes(weekly, force_refit=force_refit)
+    rank_curves = load_or_fit_rank_curves(adp_history, weekly, force_refit=force_refit)
+
+    tier_shape_lookup = {
+        (r["position"], r["tier"]): tier_shape_from_row(r) for r in tier_shapes.to_dicts()
+    }
+    rank_curve_lookup = {r["position"]: rank_curve_from_row(r) for r in rank_curves.to_dicts()}
+
+    ranked = rankings.with_columns(
+        pl.col("rank").rank(method="ordinal").over("position").alias("position_rank")
+    )
+
+    pool: dict[str, PlayerDistribution] = {}
+    excluded: list[dict] = []
+
+    # --- skill positions: match to crosswalk, exclude on failure ---
+    skill = ranked.filter(pl.col("position").is_in(SKILL_POSITIONS))
+    matched = match_by_name(skill, crosswalk)
+    for row in matched.to_dicts():
+        player_id = _player_id_from_crosswalk_row(row)
+        if player_id is None:
+            excluded.append({"name": row["name"], "position": row["position"], "rank": row["rank"]})
+            continue
+        position = row["position"]
+        position_rank = int(row["position_rank"])
+        tier = tier_for_rank(position, position_rank)
+        curve = rank_curve_lookup[position]
+        target_mean = curve.mean_for_rank(position_rank)
+        shape = tier_shape_lookup[(position, tier)]
+        dist = anchor_tier_shape(shape, target_mean)
+        pool[player_id] = PlayerDistribution(
+            player_id=player_id,
+            name=row["name"],
+            position=position,
+            rank=int(row["rank"]),
+            tier=tier,
+            distribution=dist,
+        )
+
+    # --- kickers: rank-anchored directly, no crosswalk ---
+    kickers = ranked.filter(pl.col("position") == "K")
+    for row in kickers.to_dicts():
+        position_rank = int(row["position_rank"])
+        tier = tier_for_rank("K", position_rank)
+        curve = rank_curve_lookup["K"]
+        target_mean = curve.mean_for_rank(position_rank)
+        shape = tier_shape_lookup[("K", tier)]
+        dist = anchor_tier_shape(shape, target_mean)
+        player_id = f"K::{row['name']}"
+        pool[player_id] = PlayerDistribution(
+            player_id=player_id,
+            name=row["name"],
+            position="K",
+            rank=int(row["rank"]),
+            tier=tier,
+            distribution=dist,
+        )
+
+    # --- defenses: one shared distribution for every team ---
+    dsts = ranked.filter(pl.col("position") == "DST")
+    shared_dst = dst_distribution()
+    for row in dsts.to_dicts():
+        player_id = f"DST::{row['name']}"
+        pool[player_id] = PlayerDistribution(
+            player_id=player_id,
+            name=row["name"],
+            position="DST",
+            rank=int(row["rank"]),
+            tier=None,
+            distribution=shared_dst,
+        )
+
+    if excluded:
+        print(f"build_player_pool: excluded {len(excluded)} unmatched skill players:")
+        for e in excluded[:20]:
+            print(f"  rank {e['rank']:>4}  {e['position']:<3}  {e['name']}")
+        if len(excluded) > 20:
+            print(f"  ... and {len(excluded) - 20} more")
+
+    return pool
+
+
+def excluded_players(
+    rankings: pl.DataFrame,
+    crosswalk: pl.DataFrame | None = None,
+) -> list[dict]:
+    """Recompute just the excluded-skill-player list (name, position, rank)
+    without building the whole pool -- used by reporting/tests that only
+    need the exclusion count."""
+    if crosswalk is None:
+        crosswalk = load_crosswalk()
+    ranked = rankings.with_columns(
+        pl.col("rank").rank(method="ordinal").over("position").alias("position_rank")
+    )
+    skill = ranked.filter(pl.col("position").is_in(SKILL_POSITIONS))
+    matched = match_by_name(skill, crosswalk)
+    out = []
+    for row in matched.to_dicts():
+        if _player_id_from_crosswalk_row(row) is None:
+            out.append({"name": row["name"], "position": row["position"], "rank": row["rank"]})
+    return out

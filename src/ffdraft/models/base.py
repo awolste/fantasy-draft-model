@@ -25,6 +25,12 @@ class WeeklyDistribution(Protocol):
         Callers must pass an explicit `np.random.Generator` -- never rely on
         global numpy random state -- so that simulations are reproducible
         from a seed.
+
+        Performance note for callers (Task 7's simulator in particular):
+        `sample` is vectorized and cheap per call regardless of `size` --
+        one call of 14,000,000 takes ~0.2s. Flatten weeks x sims into a
+        single `size` and reshape afterward; do not call `sample` in a
+        per-week Python loop.
         """
         ...
 
