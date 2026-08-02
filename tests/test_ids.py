@@ -46,3 +46,52 @@ def test_match_by_name_keeps_unmatched_rows_with_null_id():
 
 def test_crosswalk_columns_are_the_four_id_systems():
     assert set(CROSSWALK_COLUMNS) == {"gsis_id", "espn_id", "sleeper_id", "name", "position"}
+
+
+# --- Cardinality-preservation regression tests ---
+# `normalize_name` strips generational suffixes, so father/son pairs like
+# Marvin Harrison Sr./Jr. collide onto the same (name, position) key. If the
+# crosswalk passed to `match_by_name` has more than one row per key, a plain
+# left join multiplies output rows -- a silent, uncaught cardinality bug.
+
+COLLISION_CROSSWALK = pl.DataFrame({
+    "gsis_id": [None, "00-0039849"],
+    "espn_id": [None, 4432708],
+    "sleeper_id": [None, "9490"],
+    "name": ["Marvin Harrison", "Marvin Harrison Jr."],
+    "position": ["WR", "WR"],
+})
+
+
+def test_match_by_name_raises_on_duplicate_crosswalk_keys():
+    """A crosswalk with an undeduped (name, position) collision must fail
+    loudly rather than silently return extra rows."""
+    names = pl.DataFrame({"name": ["Marvin Harrison Jr."], "position": ["WR"]})
+    with pytest.raises(ValueError, match="duplicate"):
+        match_by_name(names, COLLISION_CROSSWALK)
+
+
+def test_match_by_name_resolves_collision_to_intended_player_when_deduped():
+    """Once the crosswalk is deduped (as `load_crosswalk` does, preferring
+    the row with a real gsis_id), the collision resolves to the active
+    player, not the retired namesake."""
+    deduped = COLLISION_CROSSWALK.filter(pl.col("gsis_id").is_not_null())
+    names = pl.DataFrame({"name": ["Marvin Harrison Jr."], "position": ["WR"]})
+    out = match_by_name(names, deduped)
+    assert out.height == 1
+    assert out["gsis_id"].to_list() == ["00-0039849"]
+    assert out["espn_id"].to_list() == [4432708]
+
+
+def test_match_by_name_output_height_matches_input_height():
+    """General invariant: for a properly deduped crosswalk, one input row
+    produces exactly one output row, whether matched, unmatched, or a name
+    that would have collided before dedupe."""
+    deduped = COLLISION_CROSSWALK.filter(pl.col("gsis_id").is_not_null())
+    crosswalk = pl.concat([CROSSWALK, deduped])
+    names = pl.DataFrame({
+        "name": ["Lamar Jackson", "Nonexistent Player", "Marvin Harrison Jr."],
+        "position": ["QB", "RB", "WR"],
+    })
+    out = match_by_name(names, crosswalk)
+    assert out.height == names.height
