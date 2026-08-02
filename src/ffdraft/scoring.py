@@ -5,6 +5,7 @@ Public totals assume 4-point passing touchdowns; this league uses 6.
 """
 
 from collections.abc import Mapping
+from dataclasses import fields
 
 import polars as pl
 
@@ -23,6 +24,20 @@ STAT_TO_RULE: dict[str, str] = {
     "fumbles_lost": "fumble_lost",
     "two_pt_conversions": "two_pt",
 }
+
+
+def validate_stat_to_rule(mapping: Mapping[str, str]) -> None:
+    """Raise if any mapped value is not a real ScoringRules field name."""
+    valid_fields = {f.name for f in fields(ScoringRules)}
+    invalid = {stat: rule for stat, rule in mapping.items() if rule not in valid_fields}
+    if invalid:
+        raise ValueError(
+            f"STAT_TO_RULE references unknown ScoringRules field(s): {invalid}. "
+            f"Valid fields are: {sorted(valid_fields)}"
+        )
+
+
+validate_stat_to_rule(STAT_TO_RULE)
 
 
 def score_stat_line(line: Mapping[str, float], rules: ScoringRules = SCORING) -> float:
@@ -46,7 +61,4 @@ def add_fantasy_points(df: pl.DataFrame, rules: ScoringRules = SCORING) -> pl.Da
     ]
     if not terms:
         return df.with_columns(pl.lit(0.0).alias("fantasy_points"))
-    expr = terms[0]
-    for term in terms[1:]:
-        expr = expr + term
-    return df.with_columns(expr.round(2).alias("fantasy_points"))
+    return df.with_columns(pl.sum_horizontal(terms).round(2).alias("fantasy_points"))

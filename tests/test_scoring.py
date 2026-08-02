@@ -1,7 +1,10 @@
+from dataclasses import fields
+
+import pytest
 import polars as pl
 
-from ffdraft.league import SCORING
-from ffdraft.scoring import score_stat_line, add_fantasy_points
+from ffdraft.league import SCORING, ScoringRules
+from ffdraft.scoring import score_stat_line, add_fantasy_points, validate_stat_to_rule
 
 STAT_COLUMNS = [
     "passing_yards", "passing_tds", "interceptions",
@@ -76,3 +79,38 @@ def test_add_fantasy_points_treats_missing_stats_as_zero():
     df = pl.DataFrame({"player_id": ["K1"], "receptions": [None], "rushing_yards": [12.0]})
     out = add_fantasy_points(df, SCORING)
     assert out["fantasy_points"].to_list() == [1.2]
+
+
+def test_score_stat_line_and_add_fantasy_points_agree():
+    """Guards against the two scoring paths silently diverging."""
+    lines = [
+        blank_line(),
+        blank_line(
+            passing_yards=320, passing_tds=3, interceptions=1,
+            rushing_yards=30, rushing_tds=1,
+        ),
+        blank_line(receptions=9, receiving_yards=120, receiving_tds=1),
+        blank_line(interceptions=2, fumbles_lost=1),
+    ]
+    expected = [score_stat_line(line, SCORING) for line in lines]
+
+    df = pl.DataFrame(lines)
+    out = add_fantasy_points(df, SCORING)
+    actual = out["fantasy_points"].to_list()
+
+    assert actual == expected, (
+        f"score_stat_line and add_fantasy_points disagree: "
+        f"expected {expected}, got {actual} for lines {lines}"
+    )
+
+
+def test_validate_stat_to_rule_rejects_unknown_field():
+    bad_mapping = {"passing_yards": "not_a_real_field"}
+    with pytest.raises(ValueError, match="not_a_real_field"):
+        validate_stat_to_rule(bad_mapping)
+
+
+def test_validate_stat_to_rule_accepts_known_fields():
+    valid_fields = {f.name for f in fields(ScoringRules)}
+    good_mapping = {"passing_yards": next(iter(valid_fields))}
+    validate_stat_to_rule(good_mapping)  # should not raise
