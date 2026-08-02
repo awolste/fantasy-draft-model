@@ -1311,9 +1311,40 @@ print(frames['league_managers'].group_by('manager_id').len().sort('len', descend
 
 Expected: `league_drafts (1440, 6)` for 8 seasons × 180 picks, and a manager table showing which SWIDs appear in all 8 seasons. Managers appearing in fewer seasons are newer members — record which, since the opponent model will have less data on them.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Generate the manager label template for manual identification**
+
+SWIDs are opaque. The owner can identify each manager by hand, and doing so once makes every downstream diagnostic readable and confirms the SWID grouping is actually correct rather than assumed.
 
 ```bash
+.venv/bin/python - <<'PY'
+import polars as pl
+from ffdraft.store import read
+
+managers = read("league_managers")
+summary = (
+    managers.group_by("manager_id")
+    .agg(
+        pl.col("season").min().alias("first_season"),
+        pl.col("season").max().alias("last_season"),
+        pl.col("season").count().alias("seasons"),
+        pl.col("team_name").last().alias("most_recent_team_name"),
+    )
+    .sort("seasons", descending=True)
+    .with_columns(pl.lit("").alias("manager_name"))
+)
+summary.write_csv("data/manager_labels.csv")
+print(summary)
+PY
+```
+
+Expected: one row per distinct SWID, sorted by tenure, with an empty `manager_name` column. Hand this to the owner to fill in the names. Managers with fewer than 8 seasons are the ones who joined or left — note them, because the opponent model must shrink their tendencies toward the league average in proportion to how few drafts they have on record.
+
+`data/` is gitignored, so copy the completed file to `config/manager_labels.csv` and commit that, since it is hand-entered knowledge that must not be lost.
+
+- [ ] **Step 7: Commit**
+
+```bash
+mkdir -p config
 git add src/ffdraft/sources/espn_parse.py tests/test_espn_parse.py
 git commit -m "feat: parse ESPN drafts, managers, and season results"
 ```

@@ -1,0 +1,32 @@
+# Plan Index
+
+**Read this first if you are picking up this project.**
+
+1. Read the design spec: [`../specs/2026-08-02-ff-draft-2026-design.md`](../specs/2026-08-02-ff-draft-2026-design.md). It contains the league configuration, the approach and why alternatives were rejected, and the validation gate. Do not re-litigate decisions recorded there without a reason.
+2. Find the first stage below not marked **Complete**.
+3. If its plan exists, execute it. If it does not exist yet, write it using the `superpowers:writing-plans` skill, informed by what the previous stage actually produced.
+
+Each stage produces working, independently testable software. Stages are written one at a time, on purpose: writing Stage 3's plan before Stage 2's models exist would lock in decisions about model internals before the real data has been seen.
+
+## Stages
+
+| # | Plan | Produces | Status |
+|---|---|---|---|
+| 1 | [`2026-08-02-data-foundation.md`](2026-08-02-data-foundation.md) | Every input pulled, ID-matched, scored under league rules, validated | **In progress** |
+| 2 | *not yet written* — `player-and-season-model.md` | Weekly points distributions per player; season simulator taking 10 rosters to a champion | Not started |
+| 3 | *not yet written* — `opponent-model-and-optimizer.md` | Opponent draft model, draft rollout, recommender, backtest, and the 0RB vs. Hero RB answer | Not started |
+| 4 | *not yet written* — `live-assistant.md` | Streamlit draft-day tool with type-ahead pick entry | Not started |
+
+**Stage 4 should not begin before August 2026**, when ESPN's 2026 endpoints are live and live-draft behavior can be tested against reality.
+
+## Context that is easy to lose
+
+These are the non-obvious constraints that took a conversation to establish. They are recorded in the spec in full; this is the short list so nobody rediscovers them the hard way.
+
+- **6-point passing TDs.** Nearly every public ranking and projection assumes 4. All fantasy points are computed from raw stat lines for this reason. Never consume a precomputed fantasy total.
+- **The waiver wire is ordinary, not rich.** 10 teams × 18 roster spots = 180 rostered players, the same depth as a 12-team league with 15 spots. An early assumption that a 10-team league implies a shallow pool was wrong.
+- **60% of teams make the playoffs**, so regular-season wins are cheap except for the top-2 bye. The objective is championship probability, not points and not wins. Variance has positive value here.
+- **Managers are keyed by SWID**, never team ID or team name. Membership is mostly stable 2018–2025 but some managers left and joined; per-manager tendencies must be shrunk toward the league prior in proportion to seasons on record.
+- **Defenses go earlier than ADP here** because benches are deep. Used as a check that the opponent model fitted correctly.
+- **Draft slot is 8** in a 10-team snake, so picks come in back-to-back pairs near the turn (8 and 13) and are better planned as pairs.
+- **The backtest is a gate, not a formality.** If the engine does not beat ADP-following on held-out 2025, it does not work. A large apparent edge means overfitting, not success.

@@ -84,6 +84,10 @@ Historical stats come from nflverse rather than a fantasy site because it suppli
 
 One league tendency is known in advance and serves as a model check: **defenses are drafted earlier here than consensus ADP suggests**, because 8-man benches leave room to stash them. The model should recover this from the data without being told. If it does not, the fit is suspect. The practical consequence is that skill-position players last longer in this league than generic ADP implies, so correct play is more patient than a stock cheat sheet would advise.
 
+**Manager continuity.** The league's membership is mostly stable across 2018–2025, but some managers have left and others joined. Managers are keyed by ESPN owner SWID, since team IDs and team names are not stable across seasons. The owner is able to identify managers manually, so Stage 1 produces a `manager_labels.csv` mapping each SWID to a human name and the seasons they were active; this is filled in by hand once and then used for the rest of the project. It makes every downstream diagnostic readable ("Dave reaches for RBs" rather than a SWID), and it lets us confirm the automated SWID grouping is actually correct rather than assuming it.
+
+Managers with few seasons of history are a real modeling problem, not an edge case: a first-year manager has no reach tendency to fit. The opponent model must therefore shrink each manager's individual tendencies toward the league-average prior in proportion to how many drafts they have on record, rather than fitting each manager independently. A manager with one draft should be modeled as close to league-average; a manager with eight should be modeled as mostly themselves.
+
 **`replacement_model.py`** — realistic weekly waiver availability at this league's roster depth, derived from historical weekly data.
 
 ### sim/
@@ -98,11 +102,22 @@ One league tendency is known in advance and serves as a model check: **defenses 
 
 **`recommender.py`** prunes to roughly the top 15 candidates by roster-aware value, rolls out each, and returns them ranked by title equity with an explanation. Target budget is a few seconds per pick, which is well within the time available on the clock.
 
-## Deliverables
+## Delivery stages
 
-**Stage 1 — structure study and cheat sheet.** The empirical answer to 0RB vs. Hero RB vs. 2RB:1WR from slot 8, a tiered draft board, and a set of if-then contingencies for the situations most likely to arise at picks 8 and 13.
+The work is split into four plans. Each produces working, independently testable software and has its own plan document under `docs/superpowers/plans/`. **A worker picking this up mid-project should read this spec, then the index at `docs/superpowers/plans/README.md`, then the plan for the first stage not marked complete.**
 
-**Stage 2 — live assistant.** Streamlit app with type-ahead pick entry, recommending after every pick.
+| Stage | Plan | Produces | Depends on |
+|---|---|---|---|
+| 1 | `2026-08-02-data-foundation.md` | Every input pulled, ID-matched, scored under league rules, validated | — |
+| 2 | *(not yet written)* `player-and-season-model.md` | Weekly points distributions per player; a season simulator that takes 10 rosters and returns a champion | Stage 1 |
+| 3 | *(not yet written)* `opponent-model-and-optimizer.md` | Opponent draft model, draft rollout, the recommender, and the backtest — including the 0RB vs. Hero RB answer | Stage 2 |
+| 4 | *(not yet written)* `live-assistant.md` | Streamlit draft-day tool with type-ahead pick entry | Stage 3 |
+
+Stages 2–4 are deliberately unwritten until their predecessor lands. Writing them now would lock in decisions about model internals before the real data has been seen, and the shape of the fitted data should inform them.
+
+**Stage 3 is where the headline outputs appear:** the empirical answer to 0RB vs. Hero RB vs. 2RB:1WR from slot 8, a tiered draft board, and if-then contingencies for the situations most likely to arise at picks 8 and 13.
+
+**Timing:** Stage 4 should not begin before August, when ESPN's 2026 endpoints are live and the live-draft behavior can actually be tested.
 
 Manual pick entry is the **primary** path for the live assistant. ESPN's live draft room runs over an undocumented websocket that changes between seasons, and polling the draft endpoint during a live draft can return stale state. Auto-sync will be attempted in August when the 2026 endpoints are live and testable, as a bonus. Building on the assumption that auto-sync works is the likeliest way to arrive at draft day with nothing.
 
