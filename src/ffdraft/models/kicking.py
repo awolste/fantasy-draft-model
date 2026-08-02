@@ -12,7 +12,14 @@ import polars as pl
 
 from ..league import KICKING, KickingRules
 
-# Maps a stat column name to the KickingRules field that prices it.
+# Maps a stat column name to the KickingRules field that prices it. Two
+# many-to-one collapses live here, both intentional:
+#   - the 0-19/20-29/30-39 distance buckets all collapse onto fg_0_39, since
+#     this league prices the whole 0-39 range as a single 3-point tier.
+#   - fg_blocked collapses onto fg_missed: upstream tracks blocked attempts
+#     as a bucket separate from fg_missed (fg_att = fg_made + fg_missed +
+#     fg_blocked), but a blocked kick is a failed attempt, matching this
+#     league's "FG missed" rule and ESPN's own convention.
 KICKING_STAT_TO_RULE: dict[str, str] = {
     "pat_made": "pat_made",
     "fg_made_0_19": "fg_0_39",
@@ -22,6 +29,7 @@ KICKING_STAT_TO_RULE: dict[str, str] = {
     "fg_made_50_59": "fg_50_59",
     "fg_made_60_": "fg_60_plus",
     "fg_missed": "fg_missed",
+    "fg_blocked": "fg_missed",
 }
 
 

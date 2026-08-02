@@ -52,6 +52,14 @@ def test_missing_columns_treated_as_zero():
     assert add_kicking_points(df)["fantasy_points"].to_list() == [4.0]
 
 
+def test_blocked_field_goal_costs_one():
+    assert score_kicking_line(blank(fg_blocked=1)) == -1.0
+
+
+def test_missed_and_blocked_both_penalize():
+    assert score_kicking_line(blank(fg_missed=1, fg_blocked=1)) == -2.0
+
+
 def test_validate_stat_to_rule_rejects_unknown_field():
     bad_mapping = {"pat_made": "not_a_real_field"}
     with pytest.raises(ValueError, match="not_a_real_field"):
