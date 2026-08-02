@@ -5,6 +5,7 @@ from ffdraft.ids import (
     CROSSWALK_COLUMNS,
     _dedupe_by_name_position,
     _with_key,
+    find_collision_groups,
     match_by_name,
     normalize_name,
 )
@@ -141,6 +142,49 @@ def test_dedupe_by_name_position_breaks_gsis_id_tie_with_espn_id():
     out = _deduped(raw)
     assert out.height == 1
     assert out["espn_id"].to_list() == [1234]
+
+
+# --- find_collision_groups ---------------------------------------------------
+# Direct tests. Everywhere else find_collision_groups is only exercised
+# indirectly through hand-built frames in test_validate.py that are already
+# shaped as if it had run -- an off-by-one in the `is_kept` tagging or the
+# `_group_size` filter would go uncaught. These call it directly on a small
+# synthetic frame with both colliding and non-colliding rows.
+
+COLLISION_SOURCE = pl.DataFrame({
+    "gsis_id": ["00-OLDGUY", None, "00-SOLO", "00-B-OLD", "00-B-NEW"],
+    "espn_id": [None, None, None, None, None],
+    "sleeper_id": [None, None, None, None, None],
+    "name": [
+        "Test Player Sr.", "Test Player Jr.", "Solo Player",
+        "Player B Sr.", "Player B Jr.",
+    ],
+    "position": ["WR", "WR", "RB", "TE", "TE"],
+    "draft_year": [1996, 2024, 2015, 1990, 2020],
+})
+
+
+def test_find_collision_groups_returns_one_kept_per_group():
+    groups = find_collision_groups(_with_key(COLLISION_SOURCE))
+    for (_key, _pos), sub in groups.group_by(["name_key", "position"]):
+        assert sub["is_kept"].sum() == 1
+
+
+def test_find_collision_groups_kept_row_matches_dedupe_preference():
+    """The row find_collision_groups tags is_kept=True must be the same row
+    _dedupe_by_name_position would actually keep -- higher draft_year wins."""
+    groups = find_collision_groups(_with_key(COLLISION_SOURCE))
+    winner = groups.filter(pl.col("is_kept"))
+    assert set(winner["name"].to_list()) == {"Test Player Jr.", "Player B Jr."}
+    assert set(winner["draft_year"].to_list()) == {2024, 2020}
+
+
+def test_find_collision_groups_excludes_non_colliding_rows():
+    """Solo Player shares no (name, position) key with anyone else and must
+    not appear in the output at all."""
+    groups = find_collision_groups(_with_key(COLLISION_SOURCE))
+    assert "Solo Player" not in groups["name"].to_list()
+    assert groups.height == 4  # two collision groups, two rows each
 
 
 def test_match_by_name_output_height_matches_input_height():
