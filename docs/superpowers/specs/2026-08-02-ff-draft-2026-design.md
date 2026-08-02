@@ -123,7 +123,9 @@ Manual pick entry is the **primary** path for the live assistant. ESPN's live dr
 
 ## Validation
 
-**Backtest against 2025.** Hold out the 2025 season entirely. Every model is fitted on data through 2024 only: the player and variance models on nflverse seasons 2015–2024, the opponent model on this league's 2018–2024 drafts (seven of the eight available seasons, since 2025 is the holdout). Run the engine against 2025's actual ADP from slot 8, then score the resulting roster against real 2025 weekly results. Compare to three baselines: best-available-by-ADP, best-available-by-consensus-ranking, and random-but-positionally-legal.
+**Backtest against 2024** (revised from 2025 — see below). Hold out the 2024 season entirely. Every model is fitted on data through 2023 only: the player and variance models on nflverse seasons 2015–2023, the opponent model on this league's 2018–2023 drafts. Run the engine against 2024's actual ADP from slot 8, then score the resulting roster against real 2024 weekly results. Compare to three baselines: best-available-by-ADP, best-available-by-consensus-ranking, and random-but-positionally-legal.
+
+*Why 2024 and not 2025:* the opponent model learns how each manager drafts **relative to that year's ADP**, so it needs historical ADP, and so does the backtest. Fantasy Football Calculator — the only free source with historical ADP — has 2018–2024 and 2026 but **no 2025 data at all**, verified across every scoring type. The 2025 season therefore cannot contribute to ADP-relative fitting and cannot serve as the holdout. Its draft picks remain available from ESPN and are still usable for anything not requiring ADP.
 
 **Report results broken down by round**, not only in aggregate. The expectation is that rounds 1–2 largely reproduce consensus — at pick 8 there are only a few defensible choices and the tool should agree with them — while the measurable edge concentrates in the round 1–3 structural decision and in rounds 3–8, where survival probability and positional scarcity diverge most from raw ADP. If the aggregate edge turns out to come from somewhere else entirely, that is worth understanding before trusting it.
 
