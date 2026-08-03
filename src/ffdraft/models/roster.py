@@ -53,6 +53,32 @@ availability distribution on the fallback path. This is a judgment call,
 not a given -- documented so a future maintainer can revisit it if it turns
 out to hide something worth catching.
 
+## Replacement level is already a healthy player
+
+A fallback player never gets an availability model applied on top of its
+replacement distribution -- at *any* position, not just DST. This was not
+the original design: an earlier version of this module applied
+`availability_by_position` uniformly to found and fallback players alike,
+which shifted `scripts/season_report.py`'s 2024 calibration numbers (see
+that script's git history / the task report for the before/after). On
+review, the earlier design was wrong, not the numbers.
+
+`replacement.weekly_replacement_values` (see `models/replacement.py`)
+defines replacement level as the mean *actual, realized* score of the top
+few available players that week, ranked ex-ante by trailing form --
+`current = available.filter(pl.col("week") == week)` reads directly from
+`weekly_stats`, which only has a row for a week a player actually
+appeared in. A player who was hurt or inactive that week simply is not a
+candidate in that week's shortlist; the estimator is already, by
+construction, "what a manager gets by streaming a player who is available
+and playing." Layering `PlayerAvailability`'s Markov chain on top of that
+would model that *same* replacement slot going unavailable a second time --
+double-counting unavailability that has already been priced out of the
+replacement number. A real manager whose streamed pickup got scratched
+simply streams a different healthy player instead of leaving the slot
+empty; the replacement-level number already reflects that behavior, so the
+roster construction step must not re-apply availability to it.
+
 ## DST has no separate "replacement level"
 
 Every DST in this league shares one distribution (`defense.
@@ -137,10 +163,12 @@ def build_roster(
     `replacement_by_position` is typically `replacement.
     replacement_by_position()` plus a `"DST"` entry the caller adds (see
     module docstring). `availability_by_position` is typically
-    `availability.availability_by_position()`; DST never gets an
-    availability model (every team is assumed to always have a defense to
-    start, matching `SeasonRosterPlayer`'s own convention), so it is looked
-    up for every other position only.
+    `availability.availability_by_position()`; it is only ever consulted for
+    a player *found* in the pool, and even then not for DST (every team is
+    assumed to always have a defense to start, matching `SeasonRosterPlayer`
+    's own convention). A fallback (replacement-level) player never gets an
+    availability model, at any position -- see module docstring,
+    "Replacement level is already a healthy player."
 
     Raises `ValueError` for a malformed pick (bad `player_id`, unknown
     `position`, or a valid `position` missing from `replacement_by_position`
@@ -165,6 +193,7 @@ def build_roster(
         if entry is not None:
             resolved_position = entry.position
             distribution: WeeklyDistribution = entry.distribution
+            availability = None if resolved_position == "DST" else availability_by_position.get(resolved_position)
         else:
             if position not in replacement_by_position:
                 raise ValueError(
@@ -175,9 +204,14 @@ def build_roster(
                 )
             resolved_position = position
             distribution = replacement_by_position[position]
+            # No availability model on the fallback path, for any position
+            # -- see module docstring, "Replacement level is already a
+            # healthy player." Applying one here would double-count
+            # unavailability that `replacement.py`'s estimator has already
+            # conditioned away.
+            availability = None
             fallback_ids.append(player_id)
 
-        availability = None if resolved_position == "DST" else availability_by_position.get(resolved_position)
         players.append(SeasonRosterPlayer(player_id, resolved_position, distribution, availability))
 
     return RosterBuildResult(

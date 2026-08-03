@@ -9,7 +9,6 @@ manager name) or by 2024 draft slot (`round_pick` in round 1).
 
 from __future__ import annotations
 
-import dataclasses
 import time
 
 import numpy as np
@@ -92,17 +91,6 @@ def build_2024_rosters():
     }
 
     team_picks: list[list[DraftPick]] = [[] for _ in range(N_TEAMS)]
-    # A pre-existing quirk of this script (not build_roster): a K pick that
-    # cannot be matched into the pool by name is historically treated as
-    # "no availability model" (always available) rather than K's fitted
-    # availability, unlike every other position's replacement-level
-    # fallback (which does use the position's model). That is inconsistent
-    # -- build_roster's own contract is the consistent one (see its module
-    # docstring) -- but this script's job here is reproducing the exact,
-    # already-documented 2024 calibration numbers, not re-deriving them, so
-    # this one historical edge case (1 of 180 picks) is preserved by
-    # overriding it after build_roster runs, tracked here by team.
-    k_fallback_keys_by_team: list[set[str]] = [set() for _ in range(N_TEAMS)]
     n_dst = 0
     n_total = 0
     n_unresolvable = 0
@@ -138,8 +126,6 @@ def build_2024_rosters():
             name_row = weekly.filter(pl.col("player_id") == gsis_id).select("player_name").head(1)
             key = f"K::{name_row['player_name'][0]}" if name_row.height else gsis_id
             team_picks[team_idx].append((key, "K"))
-            if key not in pool:
-                k_fallback_keys_by_team[team_idx].add(key)
         elif position is not None:
             # Real, identified player at a known skill position, but not in
             # the ADP-2024-anchored pool (e.g. undrafted-by-ADP deep bench
@@ -158,16 +144,9 @@ def build_2024_rosters():
 
     rosters = []
     n_fallback = 0
-    for team_idx, picks in enumerate(team_picks):
+    for picks in team_picks:
         result = build_roster(picks, pool, replacement_with_dst, availability)
-        players = result.players
-        k_fallback_keys = k_fallback_keys_by_team[team_idx]
-        if k_fallback_keys:
-            players = [
-                dataclasses.replace(p, availability=None) if p.player_id in k_fallback_keys else p
-                for p in players
-            ]
-        rosters.append(players)
+        rosters.append(result.players)
         # DST fallbacks are a bookkeeping artifact, not a real gap (see the
         # comment above where DST picks are appended) -- excluded from the
         # headline count so it reports the same thing it always has: picks

@@ -131,7 +131,17 @@ def test_pick_absent_from_pool_falls_back_to_replacement_at_right_position():
     fallback_player = [p for p in result.players if p.player_id == "unknown_rb"][0]
     assert fallback_player.position == "RB"
     assert fallback_player.distribution is REPLACEMENT["RB"]
-    assert fallback_player.availability is AVAIL["RB"]
+    # Replacement level is already "a healthy player who actually played
+    # that week" (see models/replacement.py's estimator) -- applying an
+    # availability model on top would double-count unavailability, so a
+    # fallback player never gets one, at any position.
+    assert fallback_player.availability is None
+
+
+def test_found_in_pool_player_still_gets_availability_model():
+    picks = [("qb1", "QB")]
+    result = build_roster(picks, POOL, REPLACEMENT, AVAIL)
+    assert result.players[0].availability is AVAIL["QB"]
 
 
 def test_dst_pick_absent_from_pool_falls_back_to_shared_dst_distribution():
