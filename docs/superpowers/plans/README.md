@@ -8,12 +8,23 @@
 
 Each stage produces working, independently testable software. Stages are written one at a time, on purpose: writing Stage 3's plan before Stage 2's models exist would lock in decisions about model internals before the real data has been seen.
 
+## Stage 2 findings that Stage 3 depends on
+
+Measured, not assumed. Do not re-derive these; do check them if a Stage 3 result looks strange.
+
+- **Realistic edge is small.** In the 2024 calibration, the best-drafted roster had ~17% championship probability against a 10% baseline, and the actual champion drew 9.1%. A 60% playoff rate plus a 3-round bracket washes out most roster edge. If Stage 3's backtest claims a large edge over ADP-following, suspect overfitting rather than success.
+- **Correlation is not material — measured, not assumed.** Real weekly correlations: QB1–WR1 same team **0.372**, QB1–TE1 0.281, opposing-team skill totals 0.187, QB1–RB1 0.070, and WR1–WR2 same team only **0.034** (shared offense is cancelled by target competition). Injecting a calibrated copula moves the stacked-vs-diversified championship gap by **−0.42pp** against a 0.22pp SE bound. The production simulator stays on independent sampling. Note the sign: correlation *reduces* a stacked roster's edge, because clustered bad weeks cost more than clustered good weeks when 60% of the league makes the playoffs. See `scripts/correlation_impact.py`.
+- **Replacement level is an order statistic, not a mean.** What you get off waivers is the best available option each week, not the average deep player. Measured (points/week): QB 18.3, RB 9.6, WR 9.9, TE 8.1, K 7.9 — against starter medians of 24.3 / 15.9 / 16.4 / 12.4 / 9.0. A rostered RB starter is worth ~6.4/week over waivers and a WR ~6.5 — nearly identical, which bears directly on the 0RB question.
+- **Availability must be persistent, not independent.** P(out next week | out this week) is **75.5%**, versus 7.1% if available. Modeled as a two-state Markov chain. Independent draws would treat a season-ending injury as 14 coin flips.
+- **Lineups are set from realized scores**, which no real manager can do. Quantified hindsight bias on real 2024 rosters: max 2.5pp swing in championship probability. Modest, but those rosters were not deliberately variance-stacked, so this does not bound the effect on boom/bust builds.
+- **Rank curves are only valid inside their fitted ADP range.** Deep players have no ADP, so beyond the boundary the projection comes from empirical deep-rank data, and `RankCurve.mean_for_rank` raises past `max_supported_rank` rather than extrapolating. An earlier unconstrained power law put QB50 at 16.5 ppg against ~3.3 observed.
+
 ## Stages
 
 | # | Plan | Produces | Status |
 |---|---|---|---|
 | 1 | [`2026-08-02-data-foundation.md`](2026-08-02-data-foundation.md) | Every input pulled, ID-matched, scored under league rules, validated | **Complete** — 97 tests, 9 datasets |
-| 2 | [`2026-08-02-player-and-season-model.md`](2026-08-02-player-and-season-model.md) | Weekly points distributions per player; season simulator taking 10 rosters to a champion | **Ready to start** |
+| 2 | [`2026-08-02-player-and-season-model.md`](2026-08-02-player-and-season-model.md) | Weekly points distributions per player; season simulator taking 10 rosters to a champion | **Complete** — 210 tests, 1,000 seasons in 0.17s |
 | 3 | *not yet written* — `opponent-model-and-optimizer.md` | Opponent draft model, draft rollout, recommender, backtest, and the 0RB vs. Hero RB answer | Not started |
 | 4 | *not yet written* — `live-assistant.md` | Streamlit draft-day tool with type-ahead pick entry | Not started |
 
