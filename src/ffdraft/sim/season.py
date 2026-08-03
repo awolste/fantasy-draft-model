@@ -241,11 +241,9 @@ def solve_team_lineups_vectorized(
             masked_key = np.where(avail, keys_arr, -np.inf)
             order = np.argsort(-masked_key, axis=0)
             sorted_values = np.take_along_axis(values, order, axis=0)
-            sorted_avail = np.take_along_axis(np.broadcast_to(avail, values.shape), order, axis=0)
             avail_count = np.asarray(avail, dtype=bool).sum(axis=0)
         else:
             sorted_values = None
-            sorted_avail = None
             avail_count = np.zeros(shape, dtype=int)
 
         if count > 0:
