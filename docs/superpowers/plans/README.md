@@ -25,7 +25,7 @@ Measured, not assumed. Do not re-derive these; do check them if a Stage 3 result
 |---|---|---|---|
 | 1 | [`2026-08-02-data-foundation.md`](2026-08-02-data-foundation.md) | Every input pulled, ID-matched, scored under league rules, validated | **Complete** — 97 tests, 9 datasets |
 | 2 | [`2026-08-02-player-and-season-model.md`](2026-08-02-player-and-season-model.md) | Weekly points distributions per player; season simulator taking 10 rosters to a champion | **Complete** — 210 tests, 1,000 seasons in 0.17s |
-| 3 | *not yet written* — `opponent-model-and-optimizer.md` | Opponent draft model, draft rollout, recommender, backtest, and the 0RB vs. Hero RB answer | Not started |
+| 3 | [`2026-08-03-opponent-model-and-optimizer.md`](2026-08-03-opponent-model-and-optimizer.md) | Opponent draft model, draft rollout, recommender, backtest, and the 0RB vs. Hero RB answer | **Ready to start** |
 | 4 | *not yet written* — `live-assistant.md` | Streamlit draft-day tool with type-ahead pick entry | Not started |
 
 **Stage 4 should not begin before August 2026**, when ESPN's 2026 endpoints are live and live-draft behavior can be tested against reality.
