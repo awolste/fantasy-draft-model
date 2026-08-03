@@ -197,3 +197,53 @@ def test_load_or_fit_rank_curves_raises_on_changed_input(tmp_data_dir, monkeypat
     changed_adp = _synthetic_adp_history(np.random.default_rng(997))
     with pytest.raises(CacheStaleError, match="force_refit"):
         load_or_fit_rank_curves(changed_adp, weekly)
+
+
+# ---------------------------------------------------------------------------
+# Cache namespacing (Stage 3 Task 1 Fix 2): two distinct `rankings` contexts
+# (e.g. the live 2026 pool vs. a historical backtest's ADP-anchored
+# rankings) must not evict each other's cache, but a genuine re-fit of the
+# SAME context's inputs must still raise.
+
+
+def test_two_rankings_contexts_both_stay_cached_without_evicting_each_other(tmp_data_dir, monkeypatch):
+    import ffdraft.models.rank_curve as rank_curve_mod
+
+    monkeypatch.setattr(rank_curve_mod, "TIER_BREAKS", {"WR": (12,)})
+    rng = np.random.default_rng(21)
+    weekly = _synthetic_weekly_stats(rng)
+    adp_history = _synthetic_adp_history(rng)
+
+    rankings_a = pl.DataFrame({"rank": [1, 2, 3], "name": ["WR0", "WR1", "WR2"], "position": ["WR"] * 3})
+    rankings_b = pl.DataFrame(
+        {"rank": [1, 2, 3, 4, 5], "name": ["WR0", "WR1", "WR2", "WR3", "WR4"], "position": ["WR"] * 5}
+    )
+
+    curves_a = load_or_fit_rank_curves(adp_history, weekly, rankings=rankings_a)
+    curves_b = load_or_fit_rank_curves(adp_history, weekly, rankings=rankings_b)
+
+    # Fitting context B must not have evicted context A's cache -- re-reading
+    # A afterwards must be a cache hit (fit_rank_curves not called again),
+    # not a stale-cache raise and not a silent refit.
+    def _boom(*args, **kwargs):
+        raise AssertionError("fit_rank_curves should not be called on a cache hit for context A")
+
+    monkeypatch.setattr(rank_curve_mod, "fit_rank_curves", _boom)
+    curves_a_again = load_or_fit_rank_curves(adp_history, weekly, rankings=rankings_a)
+    assert set(curves_a_again) == set(curves_a) == set(curves_b)
+
+
+def test_changed_input_within_one_rankings_context_still_raises(tmp_data_dir, monkeypatch):
+    import ffdraft.models.rank_curve as rank_curve_mod
+
+    monkeypatch.setattr(rank_curve_mod, "TIER_BREAKS", {"WR": (12,)})
+    rng = np.random.default_rng(22)
+    weekly = _synthetic_weekly_stats(rng)
+    adp_history = _synthetic_adp_history(rng)
+    rankings = pl.DataFrame({"rank": [1, 2, 3], "name": ["WR0", "WR1", "WR2"], "position": ["WR"] * 3})
+
+    load_or_fit_rank_curves(adp_history, weekly, rankings=rankings)
+
+    changed_adp = _synthetic_adp_history(np.random.default_rng(998))
+    with pytest.raises(CacheStaleError, match="force_refit"):
+        load_or_fit_rank_curves(changed_adp, weekly, rankings=rankings)

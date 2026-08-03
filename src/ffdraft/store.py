@@ -1,5 +1,6 @@
 """Local parquet storage. One dataset per file, no database needed."""
 
+import hashlib
 from pathlib import Path
 
 import polars as pl
@@ -86,6 +87,49 @@ def read_fingerprint(name: str) -> str | None:
     if not path.exists():
         return None
     return path.read_text()
+
+
+def cache_namespace(base_name: str, *context_frames: pl.DataFrame) -> str:
+    """A cache artifact name namespaced by a short hash of `context_frames`
+    only -- deliberately not the full set of inputs a `load_or_fit_*` fits
+    from. Use this to build the `name` passed to `write`/`read`/`exists`/
+    `write_fingerprint`/`check_cache_fresh` when a cached artifact has more
+    than one legitimate "shape" of input in normal use.
+
+    Concretely: `models.rank_curve.load_or_fit_rank_curves` is called with
+    two genuinely different `rankings` frames in normal Stage 3 use -- the
+    default 2026 pool for the live recommender, and a 2024-ADP-anchored
+    frame for the historical backtest (`scripts/season_report.py`, and
+    Stage 3's Task 6 backtest). `rankings` only affects how deep the
+    fitted tail is built, not whether the fit is "wrong" -- both are
+    equally valid, current fits. Caching both under one filename means
+    whichever context ran most recently silently evicts the other's cache:
+    the next call from the *other* context then raises `CacheStaleError`
+    even though nothing is actually stale, just a different legitimate
+    context -- and Stage 3 alternates between exactly these two contexts
+    repeatedly (backtest vs. live), so this is not a one-off collision.
+
+    The fix is to give each context its own artifact, namespaced by a hash
+    of only the frame(s) that *define* the context (e.g. `rankings` alone
+    here) -- not a hash of every input, which would also change on a
+    genuine re-ingest of e.g. `weekly_stats` and defeat the point: a
+    context-only key must stay stable across a real re-ingest so that
+    re-ingest is still caught as staleness, not silently treated as "a new
+    context." Callers therefore still compute the *full* fingerprint (every
+    inbound frame, via `fingerprint`) and check it with `check_cache_fresh`
+    against the namespaced name this function returns -- `cache_namespace`
+    only decides which file to check against, it does not replace the
+    staleness check itself.
+
+    Hashing (not embedding the frames' content directly in the filename)
+    keeps the extra filename short and filesystem-safe; using `fingerprint`
+    's own content hash keeps it stable across processes (same algorithm
+    and seed used everywhere else in this module), so identical context
+    frames from any process land in the same slot.
+    """
+    context_fp = fingerprint(*context_frames)
+    digest = hashlib.sha256(context_fp.encode()).hexdigest()[:12]
+    return f"{base_name}__{digest}"
 
 
 class CacheStaleError(RuntimeError):

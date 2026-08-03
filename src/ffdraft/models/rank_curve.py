@@ -19,7 +19,7 @@ import polars as pl
 from scipy import optimize
 
 from ..ids import normalize_name
-from ..store import check_cache_fresh, exists, fingerprint, read, write, write_fingerprint
+from ..store import cache_namespace, check_cache_fresh, exists, fingerprint, read, write, write_fingerprint
 from .tier_shape import TIER_BREAKS, _season_position_rank
 
 
@@ -235,21 +235,36 @@ def load_or_fit_rank_curves(
     pool going deeper) would otherwise silently reuse a tail that doesn't
     cover the new depth. See `load_or_fit_tier_shapes` for the staleness
     contract (`CacheStaleError` on mismatch, `force_refit=True` to refit
-    intentionally)."""
+    intentionally).
+
+    `rankings` also legitimately varies *by context*, not just by season:
+    Stage 3 calls this with the default 2026 `rankings` for the live
+    recommender and with a 2024-ADP-anchored `rankings` for the historical
+    backtest (see `scripts/season_report.py`), and alternates between the
+    two repeatedly. Both are equally valid, current fits -- neither is
+    "stale" relative to the other -- so the cache artifacts are namespaced
+    by a hash of `rankings` alone (`store.cache_namespace`) so the two
+    contexts get their own cache slot instead of one evicting the other.
+    Genuine staleness (the *same* context's `adp_history`/`weekly`/
+    `rankings` changing underneath it) is still caught: `fp` below is the
+    full fingerprint of every input, checked against that namespaced slot's
+    own stored fingerprint."""
     fp = fingerprint(adp_history, weekly, rankings) if rankings is not None else fingerprint(adp_history, weekly)
-    cache_name = "distribution_rank_curves"
-    if (
-        not force_refit
-        and exists("distribution_rank_curves")
-        and exists("distribution_deep_rank_curve")
-    ):
+    if rankings is not None:
+        adp_name = cache_namespace("distribution_rank_curves", rankings)
+        deep_name = cache_namespace("distribution_deep_rank_curve", rankings)
+    else:
+        adp_name = "distribution_rank_curves"
+        deep_name = "distribution_deep_rank_curve"
+    cache_name = adp_name
+    if not force_refit and exists(adp_name) and exists(deep_name):
         check_cache_fresh(cache_name, fp)
-        adp_table = read("distribution_rank_curves")
-        deep_table = read("distribution_deep_rank_curve")
+        adp_table = read(adp_name)
+        deep_table = read(deep_name)
     else:
         adp_table, deep_table = fit_rank_curves(adp_history, weekly, rankings=rankings)
-        write("distribution_rank_curves", adp_table)
-        write("distribution_deep_rank_curve", deep_table)
+        write(adp_name, adp_table)
+        write(deep_name, deep_table)
         write_fingerprint(cache_name, fp)
 
     curves = {}

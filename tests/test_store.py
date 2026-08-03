@@ -127,3 +127,59 @@ def test_check_cache_fresh_raises_with_actionable_message_on_mismatch(tmp_data_d
     store.write_fingerprint("thing", "abc123")
     with pytest.raises(store.CacheStaleError, match="force_refit"):
         store.check_cache_fresh("thing", "different-fingerprint")
+
+
+# ---------------------------------------------------------------------------
+# cache_namespace: two legitimate input contexts (Stage 3 Task 1 Fix 2)
+# coexist under one base name instead of evicting each other.
+
+
+def test_cache_namespace_is_stable_for_identical_context_frames():
+    a = _weekly_like([1.0, 2.0])
+    b = _weekly_like([1.0, 2.0])
+    assert store.cache_namespace("thing", a) == store.cache_namespace("thing", b)
+
+
+def test_cache_namespace_differs_for_different_context_frames():
+    a = _weekly_like([1.0, 2.0])
+    b = _weekly_like([3.0, 4.0])
+    assert store.cache_namespace("thing", a) != store.cache_namespace("thing", b)
+
+
+def test_cache_namespace_starts_with_base_name():
+    a = _weekly_like([1.0, 2.0])
+    ns = store.cache_namespace("thing", a)
+    assert ns.startswith("thing__")
+
+
+def test_two_contexts_coexist_without_evicting_each_other(tmp_data_dir):
+    context_a = _weekly_like([1.0, 2.0])
+    context_b = _weekly_like([3.0, 4.0, 5.0])
+    name_a = store.cache_namespace("thing", context_a)
+    name_b = store.cache_namespace("thing", context_b)
+
+    store.write(name_a, pl.DataFrame({"value": ["a"]}))
+    store.write_fingerprint(name_a, "fp-a")
+    store.write(name_b, pl.DataFrame({"value": ["b"]}))
+    store.write_fingerprint(name_b, "fp-b")
+
+    # Writing/checking context B must not have disturbed context A's file
+    # or fingerprint.
+    store.check_cache_fresh(name_a, "fp-a")  # must not raise
+    store.check_cache_fresh(name_b, "fp-b")  # must not raise
+    assert store.read(name_a)["value"].to_list() == ["a"]
+    assert store.read(name_b)["value"].to_list() == ["b"]
+
+
+def test_changed_input_within_one_context_still_raises_for_that_context_only(tmp_data_dir):
+    context_a = _weekly_like([1.0, 2.0])
+    context_b = _weekly_like([3.0, 4.0, 5.0])
+    name_a = store.cache_namespace("thing", context_a)
+    name_b = store.cache_namespace("thing", context_b)
+
+    store.write_fingerprint(name_a, "fp-a")
+    store.write_fingerprint(name_b, "fp-b")
+
+    with pytest.raises(store.CacheStaleError, match="force_refit"):
+        store.check_cache_fresh(name_a, "fp-a-changed")
+    store.check_cache_fresh(name_b, "fp-b")  # context B is untouched, still fresh
