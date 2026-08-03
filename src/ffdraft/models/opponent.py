@@ -101,6 +101,62 @@ _POSITION_ALIASES: Mapping[str, str] = {"PK": "K"}
 
 VALID_POSITIONS: frozenset[str] = frozenset({"QB", "RB", "WR", "TE", "K", "DST"})
 
+# `rankings_2026` (this project's live consensus-rank source, see
+# `models/distribution.py`) labels Jacksonville "JAC"; every ADP source used
+# here (`adp_history`, `adp_2026`) uses "JAX". Same phenomenon as the
+# "WSH" -> "WAS" alias already baked into `PRO_TEAM_ABBREV` above, just
+# surfacing from a different upstream source -- fixed the same way, by name,
+# rather than silently mismatching every Jacksonville D/ST lookup.
+_TEAM_ALIASES: Mapping[str, str] = {"JAC": "JAX"}
+
+
+# ---------------------------------------------------------------------------
+# Shared name/position join helper -- used by `_resolve_picks` (historical
+# picks -> that season's ADP) and `build_pool_adp_lookup` (a live player pool
+# -> real ADP for `draft.rollout`), so this exact join convention lives in
+# one place rather than being copied.
+
+
+def match_by_normalized_name(
+    df: pl.DataFrame,
+    adp_table: pl.DataFrame,
+    name_col: str = "name",
+    position_col: str = "position",
+    season_col: str | None = None,
+) -> pl.DataFrame:
+    """Left-join `df` to `adp_table` on (normalized name, position [,
+    season]), adding a nullable `adp` column to `df`.
+
+    Both sides are normalized with `ids.normalize_name` before joining, so
+    punctuation/case/suffix differences (e.g. "A.J. Brown" vs "AJ Brown")
+    don't cause a spurious miss -- the same normalization `_resolve_picks`
+    has always used. `position_col` is matched exactly (no aliasing here;
+    callers that need `_POSITION_ALIASES`-style position renaming, e.g. "PK"
+    -> "K", must apply it before calling). `season_col`, if given, must name
+    a column present in both `df` and `adp_table` and is included in the
+    join key -- needed when `adp_table` (like `adp_history`) spans multiple
+    seasons and a name could otherwise match the wrong season's row.
+    """
+    adp_keyed = adp_table.with_columns(
+        pl.col("name").map_elements(normalize_name, return_dtype=pl.String).alias("_key")
+    )
+    keyed = df.with_columns(
+        pl.col(name_col)
+        .map_elements(lambda n: normalize_name(n) if n is not None else None, return_dtype=pl.String)
+        .alias("_key")
+    )
+
+    join_keys_left = ["_key", position_col] + ([season_col] if season_col else [])
+    join_keys_right = ["_key", "position"] + ([season_col] if season_col else [])
+    select_cols = ["_key", "position", "adp"] + ([season_col] if season_col else [])
+
+    return keyed.join(
+        adp_keyed.select(select_cols),
+        left_on=join_keys_left,
+        right_on=join_keys_right,
+        how="left",
+    )
+
 
 # ---------------------------------------------------------------------------
 # Step 1: the training set
@@ -205,22 +261,9 @@ def _resolve_picks(
         right_on="espn_id",
         how="left",
     )
-    non_dst = non_dst.with_columns(
-        pl.col("position").replace(_POSITION_ALIASES),
-        pl.col("name").map_elements(
-            lambda n: normalize_name(n) if n is not None else None,
-            return_dtype=pl.String,
-        ).alias("_key"),
-    )
+    non_dst = non_dst.with_columns(pl.col("position").replace(_POSITION_ALIASES))
+    non_dst = match_by_normalized_name(non_dst, adp_history, season_col="season")
     non_dst = non_dst.with_columns(pl.col("_key").alias("player_key"))
-    adp_keyed = adp_history.with_columns(
-        pl.col("name").map_elements(normalize_name, return_dtype=pl.String).alias("_key")
-    )
-    non_dst = non_dst.join(
-        adp_keyed.select(["_key", "position", "season", "adp"]),
-        on=["_key", "position", "season"],
-        how="left",
-    )
 
     keep_cols = ["season", "overall_pick", "round", "manager_id", "position", "player_key", "adp"]
     return pl.concat([dst.select(keep_cols), non_dst.select(keep_cols)])
@@ -391,6 +434,109 @@ class AvailablePlayer:
     player_id: str
     position: str
     adp: float
+
+
+# ---------------------------------------------------------------------------
+# Step 4b: real ADP for a live player pool (`draft.rollout`)
+#
+# `AvailablePlayer.adp` should be real consensus ADP whenever it exists --
+# `pick_probabilities` was calibrated against real ADP (see `OpponentModel`'s
+# docstring), and a same-season consensus rank (e.g. FantasyPros ECR) is
+# only a proxy for it: checked directly against `data/adp_2026.parquet` for
+# this league's real 2026 pool, ECR rank and real ADP rank correlate at
+# Spearman 0.933 (strong but not interchangeable) with a mean absolute rank
+# disagreement of ~24 places, and ECR covers ~2x as many players as ADP
+# (~510 vs ~246) -- a different density on exactly the quantity
+# `pick_probabilities` fits (`log(adp) - log(overall_pick)`), which would
+# distort reach for anyone past ADP's coverage if a same-scale-looking but
+# differently-dense rank were fed in directly.
+#
+# `build_pool_adp_lookup` below matches a player pool to a real ADP table by
+# name (skill/K, via `match_by_normalized_name`) or by team abbreviation
+# (D/ST, since ADP exports label a defense "Houston Defense" while this
+# project's own rankings call the same team "Houston Texans" -- team
+# abbreviation, not name, is the column both sides share reliably). The ADP
+# table itself is always a parameter, never hardcoded to 2026: a live
+# rollout passes `data/adp_2026.parquet`, Task 6's historical backtest
+# passes `adp_history` filtered to the season being replayed.
+
+
+@dataclass(frozen=True)
+class AdpMatchReport:
+    """How many of a player pool's entries matched a real ADP row.
+
+    Every pool player is accounted for in exactly one of `matched`/
+    `unmatched` -- an unmatched player is never silently dropped from the
+    pool and never silently defaulted to some plausible-looking adp value
+    here; `unmatched_ids` names them so the caller (`draft.rollout`) can
+    decide what to do (see its module docstring for the chosen fallback).
+    """
+
+    total: int
+    matched: int
+    unmatched: int
+    unmatched_ids: tuple[str, ...]
+
+
+def build_pool_adp_lookup(
+    pool_rows: pl.DataFrame,
+    adp_table: pl.DataFrame,
+) -> tuple[dict[str, float], AdpMatchReport]:
+    """Match a player pool to real ADP.
+
+    `pool_rows` needs one row per pool player: `player_id`, `name`,
+    `position`, and `team` (only consulted for D/ST rows -- the team
+    abbreviation used to look up that team's defense in `adp_table`; may be
+    null for every non-D/ST row). `adp_table` needs `name`, `position`,
+    `team`, `adp` -- the shape both `data/adp_2026.parquet` and
+    `adp_history` already have.
+
+    Skill/K positions match by normalized name + position
+    (`match_by_normalized_name`); D/ST matches by team abbreviation, with
+    `_TEAM_ALIASES` fixing the one known "JAC" vs "JAX" mismatch between
+    this project's rankings source and every ADP table.
+
+    Returns `(adp_by_player_id, report)`. `adp_by_player_id` has an entry
+    only for players that matched; see `AdpMatchReport` for how the rest are
+    reported, never dropped or defaulted here.
+    """
+    is_dst = pl.col("position") == "DST"
+    skill_rows = pool_rows.filter(~is_dst)
+    # Cast explicitly: an all-null `team` column (every non-D/ST pool row
+    # has no team) otherwise infers a `Null` dtype, which `.replace()`
+    # below cannot cast a string mapping onto -- even on the D/ST-only
+    # slice, the column's schema dtype is fixed by the full frame it came
+    # from until cast.
+    dst_rows = pool_rows.filter(is_dst).with_columns(pl.col("team").cast(pl.String))
+
+    skill_matched = match_by_normalized_name(skill_rows, adp_table)
+
+    dst_adp = adp_table.filter(pl.col("position") == "DST").with_columns(
+        pl.col("team").cast(pl.String).replace(_TEAM_ALIASES).alias("_team")
+    )
+    dst_matched = dst_rows.with_columns(pl.col("team").replace(_TEAM_ALIASES).alias("_team")).join(
+        dst_adp.select(["_team", "adp"]), on="_team", how="left"
+    )
+
+    combined = pl.concat(
+        [skill_matched.select(["player_id", "adp"]), dst_matched.select(["player_id", "adp"])]
+    )
+
+    adp_by_id = {
+        row["player_id"]: row["adp"]
+        for row in combined.iter_rows(named=True)
+        if row["adp"] is not None
+    }
+    all_ids = pool_rows["player_id"].to_list()
+    unmatched_ids = tuple(pid for pid in all_ids if pid not in adp_by_id)
+
+    report = AdpMatchReport(
+        total=len(all_ids),
+        matched=len(adp_by_id),
+        unmatched=len(unmatched_ids),
+        unmatched_ids=unmatched_ids,
+    )
+    return adp_by_id, report
 
 
 # Softmax temperature in *rank* space (not raw score space) -- chosen so

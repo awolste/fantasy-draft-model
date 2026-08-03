@@ -69,30 +69,51 @@ produce a same-position pair at the turn where a human would visibly
 diversify. See `tests/test_rollout.py` for the plausibility check on a
 sampled rollout's first two rounds.
 
-## ADP for the opponent model, in a season with no ADP yet
+## ADP for the opponent model
 
-`models.opponent.pick_probabilities` needs each available player's `adp`.
-For a live 2026 rollout there is no 2026 `adp_history` (`opponent.py`'s
-`TRAINING_SEASONS` stops at 2024, and season-long ADP for a season that
-hasn't happened yet does not exist by definition) -- `data/adp_2026.parquet`
-exists but only covers the top ~246 players (the same deep-bench censoring
-`opponent.py`'s `JoinReport` documents for historical seasons), not the
-full ~500-player pool a rollout draws from.
+`models.opponent.pick_probabilities` was calibrated against real ADP
+(`reach = log(adp) - log(overall_pick)` -- see `OpponentModel`'s
+docstring), so real ADP is the right signal to feed it whenever it exists.
+An earlier version of this module used `PlayerDistribution.rank`
+(FantasyPros-style consensus rank) as a stand-in for ADP everywhere,
+reasoning that a rollout needs full coverage (~500+ players) and
+`data/adp_2026.parquet` only has ~246 rows. Measured directly against real
+2026 ADP, that proxy is close but not interchangeable: Spearman correlation
+0.933 (strong, not 1.0), mean absolute rank disagreement ~24 places, and
+individual misses that are not small (e.g. one player ranked 456th by
+consensus but 144th by real ADP). Worse, the two scales have different
+*density* -- ECR spans the whole ~510-player pool, ADP only ~246 -- which
+distorts reach for exactly the players past ADP's range, on the one
+quantity the opponent model was fit against.
 
-**Decision: use each `PlayerDistribution.rank` as the `adp` proxy for every
-player, uniformly, rather than blending real 2026 ADP for the top players
-with a separately-scaled fallback for the rest.** `rank` is a full-coverage,
-monotonic, overall (cross-position) consensus ordering already computed by
-`distribution.build_player_pool` for every pool player -- exactly the
-"expected order of selection" signal ADP is a proxy for. `pick_probabilities`
-only ever consumes `adp` through a rank-space softmax (see its docstring:
-"Rank space ... is used for the softmax"), so what matters is getting the
-*relative order* of available players right, which `rank` already does by
-construction; blending in real ADP for a censored top slice while falling
-back to a different scale for the rest would risk exactly the kind of
-one-sided discontinuity `JoinReport` warns is a real bias, not a knob to
-casually reach for. This also avoids duplicating `opponent.py`'s
-name/team-matching join logic a second time in this module.
+**Decision: use real ADP (`pool_adp_lookup`, via `models.opponent.
+build_pool_adp_lookup`) as the primary signal for every pool player that
+matches, and fill in the rest with a linear extrapolation of ADP on
+`PlayerDistribution.rank` fit from the matched pairs** -- continuous by
+construction (the same fitted line that would interpolate a gap in the
+middle of ADP's coverage also extrapolates past its last real rank, so
+there is no seam at the boundary the way a flat fallback constant or an
+unrelated second scale would create). This is deliberately simple (a single
+global linear fit, not a per-position or piecewise one): the goal is a
+sensible, continuous placement for players who would almost never
+realistically be drafted (past ADP's ~246-deep coverage in a 180-pick
+draft) or who merely failed today's name-matching join, not a precise
+model of their true ADP.
+
+The ADP source is a parameter (`adp_table`, plus `rankings` for D/ST's
+team-abbreviation lookup -- see `build_pool_adp_lookup`'s docstring),
+never hardcoded to 2026: a live rollout passes `data/adp_2026.parquet` and
+`rankings_2026`; Task 6's historical backtest passes `adp_history` filtered
+to the season being replayed, alongside whatever rankings-shaped table
+matches that season's pool. Leaving both `None` (the default) skips real-ADP
+matching entirely and falls back to the plain rank-proxy for every player --
+useful for fast synthetic tests of the draft mechanics that have no
+matching ADP data to inject at all.
+
+Whichever branch is used, the match (a `polars` join) and the fallback fit
+happen exactly **once per rollout call**, before the pick-by-pick loop
+starts, not once per pick -- the loop only ever does an O(1) dict lookup
+per available player.
 """
 
 from __future__ import annotations
@@ -101,6 +122,7 @@ from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 import numpy as np
+import polars as pl
 
 from ..league import DRAFT_ROUNDS, DRAFT_SLOT, N_TEAMS
 from ..models.base import WeeklyDistribution
@@ -108,8 +130,10 @@ from ..models.distribution import PlayerDistribution
 from ..models.opponent import (
     DEFAULT_ROSTER_DECAY,
     DEFAULT_TEMPERATURE,
+    AdpMatchReport,
     AvailablePlayer,
     OpponentModel,
+    build_pool_adp_lookup,
     sample_pick,
 )
 from ..models.roster import build_roster
@@ -267,6 +291,95 @@ class DraftState:
 
 
 # ---------------------------------------------------------------------------
+# Real ADP for a player pool -- see module docstring, "ADP for the opponent
+# model".
+
+
+def _pool_rows_for_adp_match(
+    pool: Mapping[str, PlayerDistribution], rankings: pl.DataFrame
+) -> pl.DataFrame:
+    """One row per pool player (`player_id`, `name`, `position`, `team`),
+    the shape `models.opponent.build_pool_adp_lookup` needs. `team` is only
+    populated for D/ST rows -- `PlayerDistribution` itself carries no team,
+    so it is recovered from `rankings` (the same rankings table the pool
+    was built from), keyed by the D/ST's full team name."""
+    dst_team_by_name = dict(
+        rankings.filter(pl.col("position") == "DST").select(["name", "team"]).iter_rows()
+    )
+    return pl.DataFrame(
+        [
+            {
+                "player_id": player_id,
+                "name": p.name,
+                "position": p.position,
+                "team": dst_team_by_name.get(p.name) if p.position == "DST" else None,
+            }
+            for player_id, p in pool.items()
+        ],
+        schema={"player_id": pl.String, "name": pl.String, "position": pl.String, "team": pl.String},
+    )
+
+
+def _extrapolate_unmatched_adp(
+    pool: Mapping[str, PlayerDistribution],
+    matched: Mapping[str, float],
+    unmatched_ids: Sequence[str],
+) -> dict[str, float]:
+    """Fill in `adp` for every pool player `build_pool_adp_lookup` could not
+    match, via a linear fit of `adp` on `PlayerDistribution.rank` estimated
+    from the matched pairs -- see module docstring for why this (not a flat
+    fallback constant) is the chosen way to stay continuous across the
+    boundary of real ADP's coverage.
+
+    If fewer than two matched players have distinct ranks, there is not
+    enough signal to fit a line at all (this only happens in degenerate/
+    test inputs -- the real 2026 match has 218+ points); every unmatched
+    player then falls back to its own `rank` directly.
+    """
+    full = dict(matched)
+    if not unmatched_ids:
+        return full
+
+    ranks = np.array([pool[pid].rank for pid in matched], dtype=float)
+    adps = np.array([matched[pid] for pid in matched], dtype=float)
+
+    if len(set(ranks.tolist())) < 2:
+        for pid in unmatched_ids:
+            full[pid] = float(pool[pid].rank)
+        return full
+
+    slope, intercept = np.polyfit(ranks, adps, 1)
+    for pid in unmatched_ids:
+        predicted = slope * pool[pid].rank + intercept
+        # adp must stay strictly positive (it is used inside a log below).
+        full[pid] = max(predicted, 1.0)
+    return full
+
+
+def pool_adp_lookup(
+    pool: Mapping[str, PlayerDistribution],
+    adp_table: pl.DataFrame,
+    rankings: pl.DataFrame,
+) -> tuple[dict[str, float], AdpMatchReport]:
+    """Real ADP for every player in `pool`, matched via `models.opponent.
+    build_pool_adp_lookup` and continuously extrapolated for anyone that
+    doesn't match (see `_extrapolate_unmatched_adp`). `rankings` is the
+    table the pool itself was built from (`rankings_2026` for a live 2026
+    pool), used only to recover D/ST team abbreviations -- see
+    `_pool_rows_for_adp_match`.
+
+    Returns `(adp_by_player_id, report)` with an entry for *every* pool
+    player (unlike `build_pool_adp_lookup`, which only returns matches) --
+    `report` still names which ones were extrapolated, via
+    `report.unmatched_ids`.
+    """
+    pool_rows = _pool_rows_for_adp_match(pool, rankings)
+    matched, report = build_pool_adp_lookup(pool_rows, adp_table)
+    full = _extrapolate_unmatched_adp(pool, matched, report.unmatched_ids)
+    return full, report
+
+
+# ---------------------------------------------------------------------------
 # Our own picks: greedy by value.py
 
 
@@ -316,6 +429,8 @@ def run_rollout(
     our_team: int = DRAFT_SLOT,
     temperature: float = DEFAULT_TEMPERATURE,
     roster_decay: float = DEFAULT_ROSTER_DECAY,
+    adp_table: pl.DataFrame | None = None,
+    rankings: pl.DataFrame | None = None,
 ) -> DraftState:
     """Play `state` forward, pick by pick, until every roster is full.
 
@@ -330,15 +445,32 @@ def run_rollout(
 
     `pool` must contain every player that could possibly be drafted --
     `available` at every step is exactly `pool.keys() - already_drafted`.
-    See the module docstring, "ADP for the opponent model", for how each
-    player's `adp` (needed by `sample_pick`) is derived from `pool` alone
-    (via `PlayerDistribution.rank`) rather than a separate ADP source.
+
+    `adp_table`/`rankings` supply real ADP for `sample_pick`'s `adp` --
+    see the module docstring, "ADP for the opponent model". Both `None`
+    (the default) skips real-ADP matching and uses `PlayerDistribution.rank`
+    directly for every player -- fine for tests of the draft mechanics that
+    have no real ADP data to inject. Supplying `adp_table` without
+    `rankings` is a configuration error (the D/ST team-abbreviation lookup
+    has nothing to read) and raises `ValueError` rather than silently
+    matching skill players only. The match + fallback fit runs exactly once
+    here, before the per-pick loop, not once per pick.
 
     Raises `ValueError` (via `sample_pick`/`value_available`) if the pool
     runs out of players before every roster is full -- a real configuration
     error (pool too small for `n_teams * rounds`), not a case to paper over.
     """
     replacement_means = {pos: float(dist.mean) for pos, dist in replacement_by_position.items()}
+
+    if adp_table is not None:
+        if rankings is None:
+            raise ValueError(
+                "rankings must be supplied whenever adp_table is given -- it is needed to "
+                "resolve D/ST team abbreviations for the ADP join (see pool_adp_lookup)."
+            )
+        adp_lookup, _adp_report = pool_adp_lookup(pool, adp_table, rankings)
+    else:
+        adp_lookup = {pid: float(p.rank) for pid, p in pool.items()}
 
     picks: list[Pick] = list(state.picks)
     rosters: dict[int, list[tuple[str, str]]] = {
@@ -364,7 +496,7 @@ def run_rollout(
             )
         else:
             candidates = [
-                AvailablePlayer(player_id=pid, position=pool[pid].position, adp=float(pool[pid].rank))
+                AvailablePlayer(player_id=pid, position=pool[pid].position, adp=adp_lookup[pid])
                 for pid in available_ids
             ]
             player_id = sample_pick(

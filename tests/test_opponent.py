@@ -18,13 +18,16 @@ import pytest
 from ffdraft.models.opponent import (
     PRO_TEAM_ABBREV,
     TRAINING_SEASONS,
+    AdpMatchReport,
     AvailablePlayer,
     BacktestResult,
     JoinReport,
     OpponentModel,
     backtest_holdout_season,
+    build_pool_adp_lookup,
     build_training_set,
     fit_opponent_model,
+    match_by_normalized_name,
     pick_probabilities,
     sample_pick,
 )
@@ -463,3 +466,118 @@ def test_sampling_per_call_timing():
     # a regression to seconds-per-call would silently blow Stage 3's rollout
     # budget, so still assert something.
     assert per_call_ms < 5.0
+
+
+# ---------------------------------------------------------------------------
+# match_by_normalized_name: the reusable name-normalization join, shared by
+# `_resolve_picks` and `draft.rollout`'s real-ADP matching (Stage 3 Task 4
+# follow-up).
+
+
+def test_match_by_normalized_name_matches_ignoring_case_and_punctuation():
+    df = pl.DataFrame(
+        {"name": ["A.J. Brown", "Bijan Robinson"], "position": ["WR", "RB"]}
+    )
+    adp_table = pl.DataFrame(
+        {
+            "name": ["AJ Brown", "Someone Else"],
+            "position": ["WR", "QB"],
+            "adp": [10.0, 99.0],
+        }
+    )
+    joined = match_by_normalized_name(df, adp_table)
+    got = dict(zip(joined["name"].to_list(), joined["adp"].to_list()))
+    assert got["A.J. Brown"] == 10.0
+    assert got["Bijan Robinson"] is None
+
+
+def test_match_by_normalized_name_respects_position_even_with_name_match():
+    # Same normalized name, different position -- must not cross-match.
+    df = pl.DataFrame({"name": ["Josh Allen"], "position": ["QB"]})
+    adp_table = pl.DataFrame({"name": ["Josh Allen"], "position": ["LB"], "adp": [500.0]})
+    joined = match_by_normalized_name(df, adp_table)
+    assert joined["adp"].to_list() == [None]
+
+
+def test_match_by_normalized_name_respects_season_column_when_given():
+    df = pl.DataFrame({"name": ["Player X"], "position": ["RB"], "season": [2024]})
+    adp_table = pl.DataFrame(
+        {"name": ["Player X", "Player X"], "position": ["RB", "RB"], "season": [2023, 2024], "adp": [1.0, 2.0]}
+    )
+    joined = match_by_normalized_name(df, adp_table, season_col="season")
+    assert joined["adp"].to_list() == [2.0]
+
+
+# ---------------------------------------------------------------------------
+# build_pool_adp_lookup: match a live player pool to a real ADP table
+# (`data/adp_2026.parquet` for a live rollout, `adp_history` filtered to one
+# season for the historical backtest).
+
+
+def test_build_pool_adp_lookup_matches_skill_players_by_name():
+    pool_rows = pl.DataFrame(
+        {
+            "player_id": ["p1", "p2"],
+            "name": ["Ja'Marr Chase", "Nobody Special"],
+            "position": ["WR", "WR"],
+            "team": [None, None],
+        }
+    )
+    adp_table = pl.DataFrame(
+        {"name": ["Jamarr Chase"], "position": ["WR"], "team": ["CIN"], "adp": [4.1]}
+    )
+    adp_by_id, report = build_pool_adp_lookup(pool_rows, adp_table)
+    assert adp_by_id["p1"] == 4.1
+    assert "p2" not in adp_by_id
+    assert report.total == 2
+    assert report.matched == 1
+    assert report.unmatched == 1
+    assert report.unmatched_ids == ("p2",)
+
+
+def test_build_pool_adp_lookup_matches_dst_by_team_abbreviation():
+    pool_rows = pl.DataFrame(
+        {
+            "player_id": ["dst1"],
+            "name": ["Houston Texans"],
+            "position": ["DST"],
+            "team": ["HOU"],
+        }
+    )
+    adp_table = pl.DataFrame(
+        {"name": ["Houston Defense"], "position": ["DST"], "team": ["HOU"], "adp": [106.6]}
+    )
+    adp_by_id, report = build_pool_adp_lookup(pool_rows, adp_table)
+    assert adp_by_id["dst1"] == 106.6
+    assert report.matched == 1
+
+
+def test_build_pool_adp_lookup_applies_jac_jax_team_alias_for_dst():
+    # rankings-style team label for Jacksonville is "JAC"; ADP tables use
+    # "JAX" -- see module docstring's `_TEAM_ALIASES`.
+    pool_rows = pl.DataFrame(
+        {"player_id": ["dst1"], "name": ["Jacksonville Jaguars"], "position": ["DST"], "team": ["JAC"]}
+    )
+    adp_table = pl.DataFrame(
+        {"name": ["Jacksonville Defense"], "position": ["DST"], "team": ["JAX"], "adp": [150.0]}
+    )
+    adp_by_id, report = build_pool_adp_lookup(pool_rows, adp_table)
+    assert adp_by_id["dst1"] == 150.0
+
+
+def test_build_pool_adp_lookup_reports_unmatched_never_silently_drops():
+    pool_rows = pl.DataFrame(
+        {
+            "player_id": ["p1", "p2", "p3"],
+            "name": ["Known Player", "Unknown Player A", "Unknown Player B"],
+            "position": ["RB", "RB", "WR"],
+            "team": [None, None, None],
+        }
+    )
+    adp_table = pl.DataFrame({"name": ["Known Player"], "position": ["RB"], "team": ["AAA"], "adp": [5.0]})
+    adp_by_id, report = build_pool_adp_lookup(pool_rows, adp_table)
+    assert isinstance(report, AdpMatchReport)
+    assert set(adp_by_id) == {"p1"}
+    assert set(report.unmatched_ids) == {"p2", "p3"}
+    # Every pool player accounted for, one way or the other.
+    assert report.matched + report.unmatched == report.total == 3
