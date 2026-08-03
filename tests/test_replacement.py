@@ -189,13 +189,23 @@ def test_empty_values_raises():
 _HAS_REPLACEMENT_FIT = exists("replacement_weekly_values") or exists("weekly_stats")
 
 
-def _get_replacement_and_baselines():
+def _get_replacement_and_baselines(monkeypatch, tmp_path):
+    """`_HAS_REPLACEMENT_FIT` is true even when `replacement_weekly_values`
+    itself isn't cached yet (it also passes when only `weekly_stats`
+    exists), so `replacement_by_position` below may need to fit-and-persist
+    a brand new cache. Redirect `DATA_DIR` to `tmp_path` before calling it
+    -- after reading the real (already-ingested) inputs, but before any
+    possible `store.write` -- so that write can never land in the real,
+    gitignored `data/replacement_weekly_values.parquet`."""
+    import ffdraft.store as store_mod
     from ffdraft.store import read
 
     weekly = read("weekly_stats")
     league_drafts = read("league_drafts")
     crosswalk = read("id_crosswalk")
     drafted = drafted_player_ids(league_drafts, crosswalk, weekly)
+
+    monkeypatch.setattr(store_mod, "DATA_DIR", tmp_path)
 
     replacement = replacement_by_position(weekly=weekly, league_drafts=league_drafts, crosswalk=crosswalk)
     starters = median_rostered_starter(weekly)
@@ -204,18 +214,18 @@ def _get_replacement_and_baselines():
 
 
 @pytest.mark.skipif(not _HAS_REPLACEMENT_FIT, reason="requires weekly_stats/league_drafts/id_crosswalk data")
-def test_replacement_level_is_positive_for_every_position():
-    replacement, _, _ = _get_replacement_and_baselines()
+def test_replacement_level_is_positive_for_every_position(monkeypatch, tmp_path):
+    replacement, _, _ = _get_replacement_and_baselines(monkeypatch, tmp_path)
     for position in POSITIONS:
         assert replacement[position].mean > 0, position
 
 
 @pytest.mark.skipif(not _HAS_REPLACEMENT_FIT, reason="requires weekly_stats/league_drafts/id_crosswalk data")
-def test_replacement_level_is_below_median_starter_and_above_deep_pool():
+def test_replacement_level_is_below_median_starter_and_above_deep_pool(monkeypatch, tmp_path):
     """The central-trap regression guard: replacement level must sit
     strictly between the deep-pool average (the trap) and the median
     rostered starter (too generous) for every position."""
-    replacement, starters, deep = _get_replacement_and_baselines()
+    replacement, starters, deep = _get_replacement_and_baselines(monkeypatch, tmp_path)
     starters_by_pos = {r["position"]: r["median_starter"] for r in starters.to_dicts()}
     deep_by_pos = {r["position"]: r["deep_pool_avg"] for r in deep.to_dicts()}
 
@@ -227,19 +237,19 @@ def test_replacement_level_is_below_median_starter_and_above_deep_pool():
 
 
 @pytest.mark.skipif(not _HAS_REPLACEMENT_FIT, reason="requires weekly_stats/league_drafts/id_crosswalk data")
-def test_replacement_level_varies_by_week_not_a_single_constant():
-    replacement, _, _ = _get_replacement_and_baselines()
+def test_replacement_level_varies_by_week_not_a_single_constant(monkeypatch, tmp_path):
+    replacement, _, _ = _get_replacement_and_baselines(monkeypatch, tmp_path)
     for position in POSITIONS:
         assert len(set(replacement[position].values)) > 5, position
 
 
 @pytest.mark.skipif(not _HAS_REPLACEMENT_FIT, reason="requires weekly_stats/league_drafts/id_crosswalk data")
-def test_qb_and_k_replacement_are_relatively_closer_to_starters_than_rb_and_wr():
+def test_qb_and_k_replacement_are_relatively_closer_to_starters_than_rb_and_wr(monkeypatch, tmp_path):
     """The streamability finding: if QB/K replacement is relatively closer
     to its own starter median than RB/WR is, report it -- this is a
     regression guard on an observed finding, not an assumed one. See the
     Task 5 report for the actual ratios if this ever needs re-deriving."""
-    replacement, starters, _ = _get_replacement_and_baselines()
+    replacement, starters, _ = _get_replacement_and_baselines(monkeypatch, tmp_path)
     starters_by_pos = {r["position"]: r["median_starter"] for r in starters.to_dicts()}
 
     ratios = {
