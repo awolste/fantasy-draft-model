@@ -12,12 +12,14 @@ from ffdraft.models.distribution import (
     excluded_players,
     fit_rank_curves,
     fit_tier_shapes,
+    load_or_fit_rank_curves,
+    load_or_fit_tier_shapes,
     modeled_starter_quantile_ratios,
     n_tiers,
     observed_starter_quantiles,
     tier_for_rank,
 )
-from ffdraft.store import exists, read
+from ffdraft.store import CacheStaleError, exists, read
 
 # ---------------------------------------------------------------------------
 # tier_for_rank / n_tiers
@@ -312,6 +314,98 @@ def test_rank_curve_never_projects_below_the_floor():
 
 
 # ---------------------------------------------------------------------------
+# load_or_fit_tier_shapes / load_or_fit_rank_curves: cache staleness
+# (Stage 3 Task 1 Fix 1). Both cache fitted parameters to disk and must not
+# serve them back once the input data (`weekly`/`adp_history`) has changed
+# out from under an existing cache file.
+
+
+@pytest.fixture
+def tmp_data_dir(tmp_path, monkeypatch):
+    import ffdraft.store as store_mod
+
+    monkeypatch.setattr(store_mod, "DATA_DIR", tmp_path)
+    return tmp_path
+
+
+def test_load_or_fit_tier_shapes_hits_cache_when_input_unchanged(tmp_data_dir, monkeypatch):
+    import ffdraft.models.distribution as dist_mod
+
+    monkeypatch.setattr(dist_mod, "TIER_BREAKS", {"WR": (12,)})
+    rng = np.random.default_rng(10)
+    weekly = _synthetic_weekly_stats(rng)
+    first = load_or_fit_tier_shapes(weekly)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("fit_tier_shapes should not be called on a cache hit")
+
+    monkeypatch.setattr("ffdraft.models.distribution.fit_tier_shapes", _boom)
+    second = load_or_fit_tier_shapes(weekly)
+    assert second.to_dicts() == first.to_dicts()
+
+
+def test_load_or_fit_tier_shapes_raises_on_changed_input(tmp_data_dir, monkeypatch):
+    import ffdraft.models.distribution as dist_mod
+
+    monkeypatch.setattr(dist_mod, "TIER_BREAKS", {"WR": (12,)})
+    rng = np.random.default_rng(11)
+    weekly = _synthetic_weekly_stats(rng)
+    load_or_fit_tier_shapes(weekly)
+
+    changed_weekly = _synthetic_weekly_stats(np.random.default_rng(999))
+    with pytest.raises(CacheStaleError, match="force_refit"):
+        load_or_fit_tier_shapes(changed_weekly)
+
+
+def test_load_or_fit_tier_shapes_force_refit_overrides_stale_cache(tmp_data_dir, monkeypatch):
+    import ffdraft.models.distribution as dist_mod
+
+    monkeypatch.setattr(dist_mod, "TIER_BREAKS", {"WR": (12,)})
+    rng = np.random.default_rng(12)
+    weekly = _synthetic_weekly_stats(rng)
+    load_or_fit_tier_shapes(weekly)
+
+    changed_weekly = _synthetic_weekly_stats(np.random.default_rng(998))
+    # force_refit=True bypasses the staleness check (and rewrites the cache
+    # + fingerprint to match the new input).
+    refit = load_or_fit_tier_shapes(changed_weekly, force_refit=True)
+    assert refit.to_dicts() == fit_tier_shapes(changed_weekly).to_dicts()
+    # subsequent unchanged calls now hit the new cache without raising.
+    load_or_fit_tier_shapes(changed_weekly)
+
+
+def test_load_or_fit_rank_curves_hits_cache_when_input_unchanged(tmp_data_dir, monkeypatch):
+    import ffdraft.models.distribution as dist_mod
+
+    monkeypatch.setattr(dist_mod, "TIER_BREAKS", {"WR": (12,)})
+    rng = np.random.default_rng(13)
+    weekly = _synthetic_weekly_stats(rng)
+    adp_history = _synthetic_adp_history(rng)
+    first = load_or_fit_rank_curves(adp_history, weekly)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("fit_rank_curves should not be called on a cache hit")
+
+    monkeypatch.setattr("ffdraft.models.distribution.fit_rank_curves", _boom)
+    second = load_or_fit_rank_curves(adp_history, weekly)
+    assert set(second) == set(first)
+
+
+def test_load_or_fit_rank_curves_raises_on_changed_input(tmp_data_dir, monkeypatch):
+    import ffdraft.models.distribution as dist_mod
+
+    monkeypatch.setattr(dist_mod, "TIER_BREAKS", {"WR": (12,)})
+    rng = np.random.default_rng(14)
+    weekly = _synthetic_weekly_stats(rng)
+    adp_history = _synthetic_adp_history(rng)
+    load_or_fit_rank_curves(adp_history, weekly)
+
+    changed_adp = _synthetic_adp_history(np.random.default_rng(997))
+    with pytest.raises(CacheStaleError, match="force_refit"):
+        load_or_fit_rank_curves(changed_adp, weekly)
+
+
+# ---------------------------------------------------------------------------
 # build_player_pool: exclusion handling
 
 
@@ -467,10 +561,19 @@ _HAS_REAL_DATA = exists("weekly_stats") and exists("rankings_2026") and exists("
 
 
 @pytest.mark.skipif(not _HAS_REAL_DATA, reason="requires ingested data/ (run scripts/ingest_all.py)")
-def test_modeled_tail_matches_observed_starter_cohort():
+def test_modeled_tail_matches_observed_starter_cohort(tmp_path, monkeypatch):
+    import ffdraft.store as store_mod
+
+    # Read real, already-ingested data first (this test's whole point is
+    # checking the fit against actual NFL history), then redirect DATA_DIR
+    # before calling build_player_pool -- it force-fits (no cache exists
+    # for these two datasets under a fresh tmp_path) and persists via
+    # `store.write`, which must never land in the real, gitignored
+    # data/distribution_*.parquet files.
     weekly = read("weekly_stats")
     rankings = read("rankings_2026")
     adp_history = read("adp_history")
+    monkeypatch.setattr(store_mod, "DATA_DIR", tmp_path)
 
     observed = observed_starter_quantiles(weekly)
     pool = build_player_pool(rankings=rankings, weekly=weekly, adp_history=adp_history)
@@ -524,10 +627,16 @@ DEEP_VS_MID_TIER_MAX_RATIO = {
 
 
 @pytest.mark.skipif(not _HAS_REAL_DATA, reason="requires ingested data/ (run scripts/ingest_all.py)")
-def test_deep_pool_players_project_well_below_mid_tier_starters():
+def test_deep_pool_players_project_well_below_mid_tier_starters(tmp_path, monkeypatch):
+    import ffdraft.store as store_mod
+
+    # Same hermeticity concern as test_modeled_tail_matches_observed_starter_cohort
+    # above: read real data first, then redirect DATA_DIR so build_player_pool's
+    # force-fit-and-persist never writes to the real data/ directory.
     rankings = read("rankings_2026")
     weekly = read("weekly_stats")
     adp_history = read("adp_history")
+    monkeypatch.setattr(store_mod, "DATA_DIR", tmp_path)
     pool = build_player_pool(rankings=rankings, weekly=weekly, adp_history=adp_history)
 
     by_pos: dict[str, list] = {}

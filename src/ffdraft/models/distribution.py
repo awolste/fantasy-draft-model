@@ -30,7 +30,7 @@ import polars as pl
 from scipy import optimize, stats
 
 from ..ids import load_crosswalk, match_by_name, normalize_name
-from ..store import exists, read, write
+from ..store import check_cache_fresh, exists, fingerprint, read, write, write_fingerprint
 from .base import WeeklyDistribution
 from .defense import dst_distribution
 
@@ -264,10 +264,19 @@ def fit_tier_shapes(weekly: pl.DataFrame) -> pl.DataFrame:
 
 
 def load_or_fit_tier_shapes(weekly: pl.DataFrame, force_refit: bool = False) -> pl.DataFrame:
+    """Cached wrapper around `fit_tier_shapes`. A cache hit is checked
+    against a fingerprint of `weekly` (see `store.fingerprint`) recorded
+    alongside the cache -- if `weekly` has changed (e.g. re-ingested with
+    new data) since the cache was written, this raises `CacheStaleError`
+    rather than silently serving parameters fit from the old data. Pass
+    `force_refit=True` to refit intentionally."""
+    fp = fingerprint(weekly)
     if not force_refit and exists("distribution_tier_shapes"):
+        check_cache_fresh("distribution_tier_shapes", fp)
         return read("distribution_tier_shapes")
     table = fit_tier_shapes(weekly)
     write("distribution_tier_shapes", table)
+    write_fingerprint("distribution_tier_shapes", fp)
     return table
 
 
@@ -493,17 +502,29 @@ def load_or_fit_rank_curves(
     rankings: pl.DataFrame | None = None,
     force_refit: bool = False,
 ) -> dict[str, RankCurve]:
+    """Cached wrapper around `fit_rank_curves`. `rankings` only affects how
+    deep the tail is built (`required_depth`), so it is folded into the
+    fingerprint whenever it's provided -- a cache fit with one `rankings`
+    frame and reused with a materially different one (e.g. next year's
+    pool going deeper) would otherwise silently reuse a tail that doesn't
+    cover the new depth. See `load_or_fit_tier_shapes` for the staleness
+    contract (`CacheStaleError` on mismatch, `force_refit=True` to refit
+    intentionally)."""
+    fp = fingerprint(adp_history, weekly, rankings) if rankings is not None else fingerprint(adp_history, weekly)
+    cache_name = "distribution_rank_curves"
     if (
         not force_refit
         and exists("distribution_rank_curves")
         and exists("distribution_deep_rank_curve")
     ):
+        check_cache_fresh(cache_name, fp)
         adp_table = read("distribution_rank_curves")
         deep_table = read("distribution_deep_rank_curve")
     else:
         adp_table, deep_table = fit_rank_curves(adp_history, weekly, rankings=rankings)
         write("distribution_rank_curves", adp_table)
         write("distribution_deep_rank_curve", deep_table)
+        write_fingerprint(cache_name, fp)
 
     curves = {}
     for row in adp_table.to_dicts():
