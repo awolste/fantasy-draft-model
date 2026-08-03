@@ -7,11 +7,12 @@ from ffdraft.models.replacement import (
     ReplacementLevelDistribution,
     deep_pool_average,
     drafted_player_ids,
+    load_or_fit_replacement_values,
     median_rostered_starter,
     replacement_by_position,
     weekly_replacement_values,
 )
-from ffdraft.store import exists
+from ffdraft.store import CacheStaleError, exists
 
 # ---------------------------------------------------------------------------
 # drafted_player_ids: identity resolution + position labeling
@@ -181,6 +182,91 @@ def test_sample_varies_not_a_single_constant():
 def test_empty_values_raises():
     with pytest.raises(ValueError):
         ReplacementLevelDistribution(position="RB", values=())
+
+
+# ---------------------------------------------------------------------------
+# load_or_fit_replacement_values: cache staleness (Stage 3 Task 1 Fix 1)
+
+
+def _full_synthetic_replacement_dataset(n_seasons: int = 10):
+    """`_synthetic_season` covers one (position, season); combine every
+    `POSITIONS` position across enough synthetic seasons to clear
+    `MIN_SEASON_WEEK_OBS` (30) per position -- each season contributes one
+    (season, week) row per week 2-5 (week 1 has no trailing history), so
+    `n_seasons=10` gives 40 rows per position, comfortably above the
+    threshold."""
+    weekly_frames = []
+    drafted_frames = []
+    for position in POSITIONS:
+        for season in range(2015, 2015 + n_seasons):
+            weekly, drafted = _synthetic_season(position, season, n_weeks=5)
+            weekly_frames.append(weekly)
+            drafted_frames.append(drafted)
+    return pl.concat(weekly_frames), pl.concat(drafted_frames)
+
+
+@pytest.fixture
+def stubbed_replacement_sources(monkeypatch):
+    """`_synthetic_season` hands back a ready-made `drafted` frame directly
+    rather than one resolved from `league_drafts`/`crosswalk` via
+    `drafted_player_ids` -- stub that resolution step so
+    `load_or_fit_replacement_values` can be exercised end to end without
+    needing realistic league_drafts/crosswalk fixtures."""
+    import ffdraft.models.replacement as repl_mod
+
+    weekly, drafted = _full_synthetic_replacement_dataset()
+    monkeypatch.setattr(repl_mod, "drafted_player_ids", lambda *a, **k: drafted)
+    league_drafts = pl.DataFrame({"placeholder": [1]})
+    crosswalk = pl.DataFrame({"placeholder": [1]})
+    return weekly, league_drafts, crosswalk
+
+
+def test_load_or_fit_replacement_values_hits_cache_when_input_unchanged(
+    tmp_path, monkeypatch, stubbed_replacement_sources
+):
+    import ffdraft.models.replacement as repl_mod
+    import ffdraft.store as store_mod
+
+    monkeypatch.setattr(store_mod, "DATA_DIR", tmp_path)
+    weekly, league_drafts, crosswalk = stubbed_replacement_sources
+    first = load_or_fit_replacement_values(weekly=weekly, league_drafts=league_drafts, crosswalk=crosswalk)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("weekly_replacement_values should not be called on a cache hit")
+
+    monkeypatch.setattr(repl_mod, "weekly_replacement_values", _boom)
+    second = load_or_fit_replacement_values(weekly=weekly, league_drafts=league_drafts, crosswalk=crosswalk)
+    assert second.to_dicts() == first.to_dicts()
+
+
+def test_load_or_fit_replacement_values_raises_on_changed_input(
+    tmp_path, monkeypatch, stubbed_replacement_sources
+):
+    import ffdraft.store as store_mod
+
+    monkeypatch.setattr(store_mod, "DATA_DIR", tmp_path)
+    weekly, league_drafts, crosswalk = stubbed_replacement_sources
+    load_or_fit_replacement_values(weekly=weekly, league_drafts=league_drafts, crosswalk=crosswalk)
+
+    changed_weekly = weekly.with_columns(pl.col("fantasy_points") + 1.0)
+    with pytest.raises(CacheStaleError, match="force_refit"):
+        load_or_fit_replacement_values(weekly=changed_weekly, league_drafts=league_drafts, crosswalk=crosswalk)
+
+
+def test_load_or_fit_replacement_values_force_refit_overrides_stale_cache(
+    tmp_path, monkeypatch, stubbed_replacement_sources
+):
+    import ffdraft.store as store_mod
+
+    monkeypatch.setattr(store_mod, "DATA_DIR", tmp_path)
+    weekly, league_drafts, crosswalk = stubbed_replacement_sources
+    load_or_fit_replacement_values(weekly=weekly, league_drafts=league_drafts, crosswalk=crosswalk)
+
+    changed_weekly = weekly.with_columns(pl.col("fantasy_points") + 1.0)
+    load_or_fit_replacement_values(
+        weekly=changed_weekly, league_drafts=league_drafts, crosswalk=crosswalk, force_refit=True
+    )  # must not raise
+    load_or_fit_replacement_values(weekly=changed_weekly, league_drafts=league_drafts, crosswalk=crosswalk)
 
 
 # ---------------------------------------------------------------------------
