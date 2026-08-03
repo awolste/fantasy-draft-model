@@ -206,71 +206,19 @@ def test_training_set_raises_on_missing_manager_join():
 
 
 # ---------------------------------------------------------------------------
-# Step 2: shrinkage
+# Step 2: league-wide reach tendency
 
 
-def test_one_way_shrinkage_weight_increases_with_sample_size():
-    """Direct unit test of the shrinkage primitive, isolated from the rest
-    of the model pipeline (see the module-level test below for why routing
-    this through `fit_opponent_model` with a dominant group is
-    confounded). Several "background" groups with true effect 0 anchor the
-    grand mean near 0; two focal groups share the same *raw* mean but
-    differ only in `n` -- the higher-n group's weight (and closeness to
-    its raw mean) must be larger."""
-    from ffdraft.models.opponent import _one_way_shrinkage
-
-    rng = np.random.default_rng(7)
-    background_groups = []
-    background_values = []
-    for i in range(6):
-        n_bg = 40
-        background_groups.append(np.array([f"bg{i}"] * n_bg))
-        background_values.append(rng.normal(0, 1.0, n_bg))
-
-    # Both focal groups' raw means are pinned to exactly the same value by
-    # construction (not left to noise), so any difference in the shrunk
-    # result is attributable only to `n`, not to sampling luck.
-    focal_true_mean = 2.0
-    n_high, n_low = 300, 4
-    high_vals = np.full(n_high, focal_true_mean) + rng.normal(0, 1.0, n_high)
-    high_vals = high_vals - high_vals.mean() + focal_true_mean  # pin the mean exactly
-    low_vals = np.full(n_low, focal_true_mean)  # zero variance -> mean pinned trivially
-
-    values = np.concatenate(background_values + [high_vals, low_vals])
-    groups = np.concatenate(
-        background_groups + [np.array(["high"] * n_high), np.array(["low"] * n_low)]
-    )
-
-    shrunk, weight, n_by_group, sigma2, tau2 = _one_way_shrinkage(values, groups)
-
-    assert weight["low"] < weight["high"]
-    assert n_by_group["high"] == n_high
-    assert n_by_group["low"] == n_low
-    # Both raw means are ~2.0; the low-n group's shrunk value must land
-    # closer to 0 (the grand mean) than the high-n group's.
-    assert abs(shrunk["low"]) < abs(shrunk["high"])
-    assert shrunk["high"] == pytest.approx(focal_true_mean * weight["high"], rel=0.05)
-
-
-def test_shrinkage_moves_low_tenure_manager_more_than_high_tenure():
-    """Full-pipeline version, with several equally-sized "filler" managers
-    so the grand mean is not dominated by any single manager's sample size
-    (which would otherwise make the high-n focal manager's *residual*
-    trivially ~0 by construction, confounding the comparison -- see git
-    history of this test for the earlier, confounded version)."""
-    rng = np.random.default_rng(3)
+def test_pos_effect_fit_from_grand_mean_residuals():
+    """Direct unit test of the (now unshrunk, league-wide-only) fit: each
+    position's `pos_effect` is exactly its mean residual from the grand
+    mean of `reach`, with no manager term involved at all."""
+    n_per_pos = 20
+    rng = np.random.default_rng(5)
     rows = []
-    n_filler_each = 60
-    for i in range(6):
-        for _ in range(n_filler_each):
-            rows.append(("filler%d" % i, float(rng.normal(0.0, 0.3))))
-
-    true_effect = 0.5
-    n_high, n_low = 60, 3
-    for _ in range(n_high):
-        rows.append(("high", true_effect + float(rng.normal(0, 0.3))))
-    for _ in range(n_low):
-        rows.append(("low", true_effect + float(rng.normal(0, 0.3))))
+    for pos, true_effect in (("RB", 0.3), ("WR", -0.2)):
+        for _ in range(n_per_pos):
+            rows.append((pos, true_effect + float(rng.normal(0, 0.05))))
 
     n = len(rows)
     training = pl.DataFrame(
@@ -278,8 +226,8 @@ def test_shrinkage_moves_low_tenure_manager_more_than_high_tenure():
             "season": [2018] * n,
             "overall_pick": [10] * n,
             "round": [1] * n,
-            "manager_id": [r[0] for r in rows],
-            "position": ["RB"] * n,
+            "manager_id": ["mgr-A"] * n,
+            "position": [r[0] for r in rows],
             "adp": [10.0] * n,
             "reach": [r[1] for r in rows],
         }
@@ -287,37 +235,22 @@ def test_shrinkage_moves_low_tenure_manager_more_than_high_tenure():
 
     model = fit_opponent_model(training)
 
-    assert model.manager_weight["low"] < model.manager_weight["high"]
-    assert abs(model.manager_effect["low"]) < abs(model.manager_effect["high"])
-    assert model.manager_n["low"] == n_low
-    assert model.manager_n["high"] == n_high
+    # pos_effect is each position's mean residual from the *grand* mean of
+    # reach (~0.05 here, the midpoint of 0.3 and -0.2 with equal group
+    # sizes), not from 0 -- so RB comes out near +0.25 and WR near -0.25.
+    assert model.pos_effect["RB"] == pytest.approx(0.25, abs=0.05)
+    assert model.pos_effect["WR"] == pytest.approx(-0.25, abs=0.05)
+    # RB and WR should be about half a unit apart, as constructed.
+    assert model.pos_effect["RB"] - model.pos_effect["WR"] == pytest.approx(0.5, abs=0.1)
 
 
-def test_manager_with_zero_tau2_shrinks_fully_to_zero():
-    """If managers are statistically indistinguishable (all noise, no true
-    between-manager signal), tau2 estimates to ~0 and every manager_effect
-    should be ~0 -- the honest "manager identity doesn't matter" outcome,
-    not a forced nonzero effect."""
-    rng = np.random.default_rng(1)
-    n = 50
-    reach = rng.normal(0, 1.0, n)
-    managers = np.array([f"m{i % 5}" for i in range(n)])
-    positions = np.array(["WR"] * n)
-
-    training = pl.DataFrame(
-        {
-            "season": [2018] * n,
-            "overall_pick": [10] * n,
-            "round": [1] * n,
-            "manager_id": managers.tolist(),
-            "position": positions.tolist(),
-            "adp": [10.0] * n,
-            "reach": reach.tolist(),
-        }
-    )
-    model = fit_opponent_model(training)
-    for m_id, effect in model.manager_effect.items():
-        assert abs(effect) < 0.5  # loosely near zero, not a strong fitted effect
+def test_predicted_reach_ignores_manager_id():
+    """`manager_id` is still accepted (see the module docstring's
+    plumbing note) but must not affect the prediction -- two different
+    manager ids at the same position must produce the identical value."""
+    model = OpponentModel(league_mu=0.1, pos_effect={"RB": 0.05}, sigma2=0.07)
+    assert model.predicted_reach("mgr-A", "RB") == model.predicted_reach("mgr-B", "RB")
+    assert model.predicted_reach("mgr-A", "RB") == pytest.approx(0.15)
 
 
 # ---------------------------------------------------------------------------
@@ -345,23 +278,27 @@ def test_all_positions_have_a_fitted_bias_on_real_league_data():
         assert pos in model.pos_effect
 
 
+def test_qb_positional_bias_is_negative_on_real_league_data():
+    """The other known league fact (owner-confirmed, not just observed):
+    this league drafts off generic consensus rankings that don't credit its
+    6-point passing TDs, so QBs go later here than that consensus would
+    suggest -- `pos_effect['QB']` must come out negative (reach = log(adp)
+    - log(pick); negative means picked after ADP implied). This is now the
+    league-wide-only model's positional term, but it is fit the same way
+    the earlier per-manager model fit it, so the removal of manager terms
+    must not have changed this finding's sign or rough size."""
+    training, _ = build_training_set()
+    model = fit_opponent_model(training)
+    assert model.pos_effect["QB"] < 0
+    assert model.pos_effect["QB"] == pytest.approx(-0.10, abs=0.05)
+
+
 # ---------------------------------------------------------------------------
 # Step 4: the sampling distribution
 
 
 def _model_no_effects() -> OpponentModel:
-    return OpponentModel(
-        league_mu=0.0,
-        pos_effect={},
-        manager_effect={},
-        manager_pos_effect={},
-        manager_weight={},
-        manager_pos_weight={},
-        manager_n={},
-        sigma2=1.0,
-        tau2_manager=0.0,
-        tau2_manager_pos=0.0,
-    )
+    return OpponentModel(league_mu=0.0, pos_effect={}, sigma2=1.0)
 
 
 def test_pick_probabilities_only_returns_available_players():

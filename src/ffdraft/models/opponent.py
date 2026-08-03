@@ -1,13 +1,36 @@
-"""The opponent draft model: P(manager m drafts player p at pick n | who is
-still available).
+"""The opponent draft model: P(player p is drafted at pick n | who is still
+available), league-wide.
 
 This is the piece that makes the optimizer specific to *this* league rather
 than generic best-player-available advice. It is fit on seven seasons
 (2018-2024) of this league's real snake drafts, joined against that
-season's consensus ADP so a manager's behaviour can be measured *relative
-to* what was "expected" at the time, not relative to hindsight. (The
-league has an eighth season of draft history, 2025, but it cannot be used
-for fitting -- see below.)
+season's consensus ADP so draft behaviour can be measured *relative to*
+what was "expected" at the time, not relative to hindsight. (The league
+has an eighth season of draft history, 2025, but it cannot be used for
+fitting -- see below.)
+
+## Why there is no per-manager personalization
+
+An earlier version of this module fit a three-level hierarchical model
+(league + manager + manager*position, with empirical-Bayes shrinkage on
+the manager terms -- see git history prior to the commit that removed it).
+On the real 2018-2023 fit, between-manager variance came out at
+tau2 ~= 0.0017 against a within-manager noise floor of sigma2 ~= 0.071 --
+individual fitted manager effects landed mostly within +-0.06 of zero, and
+the manager*position interaction shrank to exactly 0 for every cell
+(tau2_manager_pos == 0.0). Head-to-head on the 2024 holdout backtest, the
+per-manager model's predictions were *identical* to a league-wide-only
+model at every one of the 165 scored picks -- not just similar accuracy,
+but the same top-1 player predicted every single time (see
+`scripts/compare_league_wide.py`, run once to produce this evidence, kept
+for reproducibility). The manager terms were real but too small, given
+this league's thin per-manager sample (2-8 seasons each), to ever change a
+single rank-1 decision. The owner decided to drop personalization rather
+than carry machinery that provably buys nothing on this data; a future
+season with a larger per-manager sample could justify reintroducing it,
+which is why `manager_id` is still threaded through this module's public
+functions even though it no longer affects their output (see
+`pick_probabilities`).
 
 ## Why 2025 is excluded from fitting
 
@@ -287,160 +310,62 @@ def build_training_set(
 
 
 # ---------------------------------------------------------------------------
-# Step 2: reach tendency with shrinkage
-
-
-def _one_way_shrinkage(
-    values: np.ndarray, groups: np.ndarray
-) -> tuple[dict, dict, dict, float, float]:
-    """Empirical-Bayes (Efron-Morris / James-Stein style) shrinkage of
-    per-group means toward the grand mean (here, always 0 -- callers pass
-    already-demeaned residuals), for an unbalanced one-way random-effects
-    model.
-
-    Returns `(shrunk_mean_by_group, weight_by_group, n_by_group, sigma2, tau2)`.
-
-    `sigma2` is the pooled within-group variance (residual noise common to
-    every group). `tau2` is the between-group variance -- how much groups
-    genuinely differ from each other, over and above sampling noise -- and
-    is the classic method-of-moments (unbiased one-way ANOVA) estimator:
-
-        MSW = pooled within-group sum of squares / (N - G)
-        MSB = between-group sum of squares / (G - 1)
-        n0  = (N - sum(n_g^2)/N) / (G - 1)
-        tau2 = max(0, (MSB - MSW) / n0)
-
-    `n0` (not a simple average of `n_g`) is the standard correction for
-    unbalanced groups (Searle, Casella & McCulloch, *Variance Components*,
-    ch.3) -- this project's managers are wildly unbalanced (2 to 8 seasons
-    of usable history), so using a naive average `n_g` here would bias
-    `tau2`.
-
-    Each group's shrinkage weight is `w_g = tau2 / (tau2 + sigma2/n_g)` --
-    the fraction of that group's own sample mean trusted, versus the
-    remaining `1 - w_g` pulled to 0 (the grand mean of the residuals passed
-    in). This is monotonically increasing in `n_g`: a group with few
-    observations gets a small `w_g` and comes out close to 0; a group with
-    many gets `w_g` close to 1 and comes out close to its own raw mean --
-    exactly the behaviour required ("a 2-season manager must come out near
-    league-average; an 8-season manager mostly themselves").
-
-    If `tau2` estimates to 0 (groups are statistically indistinguishable
-    from each other given the noise), every weight is 0 and every group is
-    shrunk all the way to the grand mean -- the honest conclusion when
-    there is no detectable group-level signal, not a bug to work around.
-    """
-    unique_groups = sorted(set(groups.tolist()))
-    n_by_group: dict = {}
-    mean_by_group: dict = {}
-    for g in unique_groups:
-        mask = groups == g
-        n_by_group[g] = int(mask.sum())
-        mean_by_group[g] = float(values[mask].mean())
-
-    n_total = len(values)
-    n_groups = len(unique_groups)
-
-    ssw = 0.0
-    for g in unique_groups:
-        mask = groups == g
-        ssw += float(((values[mask] - mean_by_group[g]) ** 2).sum())
-    dof_w = n_total - n_groups
-    sigma2 = ssw / dof_w if dof_w > 0 else float(values.var())
-
-    grand_mean = float(values.mean())
-    ssb = sum(
-        n_by_group[g] * (mean_by_group[g] - grand_mean) ** 2 for g in unique_groups
-    )
-    msb = ssb / (n_groups - 1) if n_groups > 1 else 0.0
-
-    if n_groups > 1 and n_total > 0:
-        sum_n_sq = sum(n**2 for n in n_by_group.values())
-        n0 = (n_total - sum_n_sq / n_total) / (n_groups - 1)
-    else:
-        n0 = 1.0
-    tau2 = max(0.0, (msb - sigma2) / n0) if n0 > 0 else 0.0
-
-    weight_by_group: dict = {}
-    shrunk_by_group: dict = {}
-    for g in unique_groups:
-        n_g = n_by_group[g]
-        denom = tau2 + sigma2 / n_g
-        w_g = tau2 / denom if denom > 0 else 0.0
-        weight_by_group[g] = w_g
-        shrunk_by_group[g] = w_g * mean_by_group[g]
-
-    return shrunk_by_group, weight_by_group, n_by_group, sigma2, tau2
+# Step 2: league-wide reach tendency
 
 
 @dataclass(frozen=True)
 class OpponentModel:
-    """A fitted, additive, hierarchical model of draft reach.
+    """A fitted, additive, league-wide model of draft reach.
 
-    `reach` (see `build_training_set`) for pick `i` by manager `m` at
-    position `pos` is modeled as:
+    `reach` (see `build_training_set`) for pick `i` at position `pos` is
+    modeled as:
 
-        reach_i = league_mu
-                + pos_effect[pos]
-                + manager_effect[m]
-                + manager_pos_effect[(m, pos)]
-                + noise
+        reach_i = league_mu + pos_effect[pos] + noise
 
     `pos_effect` is the league-wide positional bias -- fit directly from
-    all ~1,100 usable observations with no shrinkage, since it is only 6
-    categories and every one of them (even the thinnest, D/ST) has several
-    dozen observations. This is the term Step 3 validates against the known
-    D/ST-early tendency.
+    all ~1,100 usable observations, since it is only 6 categories and every
+    one of them (even the thinnest, D/ST) has several dozen observations.
+    This is the term Step 3 validates against the known D/ST-early
+    tendency, and it also carries the QB-drafted-later-than-consensus
+    finding (this league drafts off generic rankings that don't credit its
+    6-point passing TDs -- a real, documented league edge, not noise).
 
-    `manager_effect` is each manager's overall reach tendency (after
-    removing the league-wide positional pattern), shrunk toward 0 (the
-    league prior) in proportion to that manager's observation count via
-    `_one_way_shrinkage`.
+    There is deliberately no manager-level term -- see the module
+    docstring's "Why there is no per-manager personalization" section for
+    the evidence (a fitted per-manager model was head-to-head identical to
+    this one on the 2024 holdout backtest).
 
-    `manager_pos_effect` is a manager's *own* positional bias beyond both
-    the league-wide positional pattern and their own overall tendency --
-    e.g. "manager X reaches early in general, AND especially for RBs". Cell
-    counts here are thin (a manager's-worth of picks split six ways across
-    up to 7 seasons), so this term is shrunk independently and, honestly,
-    is expected to shrink close to 0 for most cells -- see the report's
-    "per-manager modelling" discussion.
+    `sigma2` is the residual variance left in `reach` after removing
+    `league_mu` and `pos_effect` -- i.e. how much pick-to-pick noise this
+    simple model doesn't explain. Reported for context, not consumed by
+    fitting (there is no shrinkage left to inform).
     """
 
     league_mu: float
     pos_effect: Mapping[str, float]
-    manager_effect: Mapping[str, float]
-    manager_pos_effect: Mapping[tuple[str, str], float]
-    manager_weight: Mapping[str, float]
-    manager_pos_weight: Mapping[tuple[str, str], float]
-    manager_n: Mapping[str, int]
     sigma2: float
-    tau2_manager: float
-    tau2_manager_pos: float
 
     def predicted_reach(self, manager_id: str, position: str) -> float:
-        """The model's point estimate of this manager's log-scale reach at
-        this position -- `league_mu + pos_effect[position] + manager_effect
-        [manager_id] + manager_pos_effect[(manager_id, position)]`, with 0
-        substituted for any term the model has never seen (an unknown
-        manager or position falls back to the league-wide position effect,
-        or all the way to `league_mu` if the position is also unseen)."""
-        return (
-            self.league_mu
-            + self.pos_effect.get(position, 0.0)
-            + self.manager_effect.get(manager_id, 0.0)
-            + self.manager_pos_effect.get((manager_id, position), 0.0)
-        )
+        """The model's point estimate of log-scale reach at this position --
+        `league_mu + pos_effect[position]`, with 0 substituted if the
+        position has never been seen.
+
+        `manager_id` is accepted but unused: there is no per-manager term
+        (see the module docstring). It stays in the signature so callers
+        that already track a manager identity -- `pick_probabilities`,
+        `sample_pick`, the backtest replay -- don't need a signature change
+        if a future season's larger sample justifies reintroducing
+        personalization."""
+        return self.league_mu + self.pos_effect.get(position, 0.0)
 
 
 def fit_opponent_model(training: pl.DataFrame) -> OpponentModel:
-    """Fit `OpponentModel` from `build_training_set`'s output.
-
-    See `OpponentModel`'s docstring for the model form and `_one_way_
-    shrinkage` for the shrinkage estimator.
+    """Fit `OpponentModel` from `build_training_set`'s output: the grand
+    mean of `reach` plus each position's mean residual from it. See
+    `OpponentModel`'s docstring for the model form.
     """
     reach = training["reach"].to_numpy()
     positions = training["position"].to_numpy()
-    managers = training["manager_id"].to_numpy()
 
     league_mu = float(reach.mean())
     resid0 = reach - league_mu
@@ -450,37 +375,9 @@ def fit_opponent_model(training: pl.DataFrame) -> OpponentModel:
         pos_effect[pos] = float(resid0[positions == pos].mean())
 
     resid1 = resid0 - np.array([pos_effect[p] for p in positions])
+    sigma2 = float(resid1.var())
 
-    manager_effect, manager_weight, manager_n, sigma2, tau2_m = _one_way_shrinkage(
-        resid1, managers
-    )
-
-    resid2 = resid1 - np.array([manager_effect[m] for m in managers])
-
-    manager_pos_groups = np.array(
-        [f"{m}\x1f{p}" for m, p in zip(managers.tolist(), positions.tolist())]
-    )
-    mp_shrunk, mp_weight, mp_n, _, tau2_mp = _one_way_shrinkage(resid2, manager_pos_groups)
-
-    def _split(key: str) -> tuple[str, str]:
-        m, p = key.split("\x1f")
-        return m, p
-
-    manager_pos_effect = {_split(k): v for k, v in mp_shrunk.items()}
-    manager_pos_weight = {_split(k): v for k, v in mp_weight.items()}
-
-    return OpponentModel(
-        league_mu=league_mu,
-        pos_effect=pos_effect,
-        manager_effect=manager_effect,
-        manager_pos_effect=manager_pos_effect,
-        manager_weight=manager_weight,
-        manager_pos_weight=manager_pos_weight,
-        manager_n=manager_n,
-        sigma2=sigma2,
-        tau2_manager=tau2_m,
-        tau2_manager_pos=tau2_mp,
-    )
+    return OpponentModel(league_mu=league_mu, pos_effect=pos_effect, sigma2=sigma2)
 
 
 # ---------------------------------------------------------------------------
@@ -546,17 +443,23 @@ def pick_probabilities(
     """`P(manager_id drafts p)` for each `p` in `available`, given the
     manager's current `roster_counts` (`{position: count}`).
 
+    `manager_id` no longer changes the reach term (`OpponentModel.
+    predicted_reach` is league-wide only -- see that docstring); it is kept
+    as a parameter only because `roster_counts` is genuinely per-manager
+    state the caller already tracks, and because a future personalized
+    model would want it back at this call site without a signature change.
+
     Every player in `available` gets a nonzero probability (see
     `_MIN_ROSTER_MULTIPLIER`); probabilities are restricted to exactly the
     players passed in (nothing outside `available` can be returned) and sum
     to 1.
 
-    Form: each player's `adp` is adjusted by the manager's fitted reach at
+    Form: each player's `adp` is adjusted by the league-wide fitted reach at
     that position (`OpponentModel.predicted_reach`) to get a predicted
-    log-scale pick position -- "when this manager would typically take a
-    player at this ADP". Available players are ranked by that adjusted
-    value (rank 1 = the manager's most-wanted player still on the board)
-    and a softmax over `-rank/temperature` converts ranks to probabilities.
+    log-scale pick position -- "when a typical manager would take a player
+    at this ADP". Available players are ranked by that adjusted value (rank
+    1 = the most-wanted player still on the board) and a softmax over
+    `-rank/temperature` converts ranks to probabilities.
     Rank space (not raw adjusted-value space) is used for the softmax so
     `temperature` means the same thing regardless of what round of the
     draft this is -- see `DEFAULT_TEMPERATURE`.

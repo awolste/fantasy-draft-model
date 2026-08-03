@@ -8,6 +8,16 @@
 
 Each stage produces working, independently testable software. Stages are written one at a time, on purpose: writing Stage 3's plan before Stage 2's models exist would lock in decisions about model internals before the real data has been seen.
 
+## The league-specific edge (Stage 3, confirmed by the owner)
+
+**This league drafts quarterbacks later than consensus ADP** — fitted positional bias −0.100 log-reach, the strongest negative of any position. That is backwards from what the scoring implies: the league uses **6-point passing touchdowns** while essentially every public ranking assumes 4, so QBs are genuinely worth more here than the rankings leaguemates are reading.
+
+The owner confirmed the cause: the league drafts off generic ESPN rankings and is not especially sophisticated about adjusting for scoring settings. This is therefore a real, persistent inefficiency rather than a one-season artifact.
+
+It should surface on its own without hand-coding, because two independent parts of the model already encode it: Stage 2's player distributions anchor QB means to **actual league scoring computed from raw stat lines**, and Stage 3's opponent model says QBs survive longer than that value warrants. If Stage 3's recommender does *not* show QB value later than consensus, something is wrong with how those two pieces compose — treat that as a bug signal.
+
+Also note the deep-pick censoring caveat: `adp_history` is a top-N export that does not reach this league's deepest bench stashes, so 7.85% of picks fail to match, concentrated in DST (19.2%), K (15.8%) and TE (15.4%). That censors the latest picks for those positions and inflates their fitted "earlier than ADP" reading. Directions are trustworthy; magnitudes for those three are not.
+
 ## Stage 2 findings that Stage 3 depends on
 
 Measured, not assumed. Do not re-derive these; do check them if a Stage 3 result looks strange.
