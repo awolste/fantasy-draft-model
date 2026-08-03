@@ -161,6 +161,26 @@ def test_vectorized_lineup_handles_position_with_zero_players():
 
 
 # ---------------------------------------------------------------------------
+# _validate_replacement_means: shared with sim/lineup.py, not a near-duplicate
+# (Stage 3 Task 1 Fix 3)
+
+
+def test_validate_replacement_means_is_shared_with_lineup_module():
+    from ffdraft.sim.lineup import _validate_replacement_means as lineup_validate
+    from ffdraft.sim.season import _validate_replacement_means as season_validate
+
+    assert season_validate is lineup_validate
+
+
+def test_season_validate_replacement_means_raises_on_missing_position():
+    from ffdraft.sim.season import _validate_replacement_means
+
+    incomplete = {k: v for k, v in REPLACEMENT.items() if k != "TE"}
+    with pytest.raises(ValueError, match="TE"):
+        _validate_replacement_means(incomplete, STARTERS, FLEX_ELIGIBLE)
+
+
+# ---------------------------------------------------------------------------
 # Bracket-shape validation matches league config, not hardcoded
 
 
