@@ -38,9 +38,9 @@ Full K and DST scoring rules are in the spec. Two bands are **neutral, not missi
 
 **Branch `stage-3-optimizer` is ahead of `main` and unmerged. 360 tests pass** (342 + 18 new backtest tests). Suite takes ~11-12 minutes.
 
-Stage 3 remaining: **Task 7 (the structure study — the headline deliverable)**. Task 6 (the backtest) is done, and it failed the gate: the engine loses to naive ADP-following on real 2024 results by 13.5pp ± 1.65pp — see item 1 below. **Task 7 should not proceed on the assumption the engine works** until this is investigated.
+Stage 3 remaining: **Task 7 (the structure study — the headline deliverable)**, now built and unblocked.
 
-**That conclusion has since been overturned — see §7b tests 6-8.** Two things were wrong with it. (a) ~6pp of the deficit is an artifact of the scoring rule: `real_season_champion` sets lineups with perfect hindsight, which pays FLEX depth a premium no real manager could collect. (b) 2024 is the worst of the five usable holdout seasons for this engine. Re-run across 2020–2024 through the fixed production path, **the engine beats ADP in three of five seasons and averages +2.45pp against a between-season SE of 4.27pp** — not broken, but not demonstrated either.
+Task 6 (the backtest) is done. Its original verdict was: *the engine loses to naive ADP-following on real 2024 results by 13.5pp ± 1.65pp*. **That verdict has since been overturned — see §7b tests 6-9.** Two things were wrong with it. (a) ~6pp of the deficit is an artifact of the scoring rule: `real_season_champion` sets lineups with perfect hindsight, which pays FLEX depth a premium no real manager could collect. (b) 2024 is the worst of the five usable holdout seasons for this engine. Re-run across 2020–2024 through the fixed production path, **the engine beats ADP in three of five seasons and averages +2.45pp against a between-season SE of 4.27pp** — not broken, but not demonstrated either.
 
 **Quote ex-ante, multi-season numbers. Do not quote the single-season 2024 figure**, and do not repeat "the engine loses to ADP by 13.5pp" — that number is now known to be mostly artifact.
 
@@ -92,7 +92,9 @@ These were deliberate. Do not silently reverse them.
 
 **ADP comes from Fantasy Football Calculator, not FantasyPros.** FantasyPros fences ADP behind registration (5 rows logged out). Its ECR rankings are still used and work fine. FFC's `teams` parameter does **not** filter — `teams=10` and `teams=12` return identical data, so no 10-team-specific ADP exists anywhere.
 
-**Lineups are set from realized scores** (perfect hindsight no manager has). Originally quantified at max 2.5pp swing on real 2024 rosters, with a caveat that those rosters were not variance-stacked. **That caveat proved to be the important part — see §7b Test 6.** For a *depth*-stacked roster (15 FLEX-eligible players, which is what ADP-following produces), hindsight is worth **5.75pp**, and it is worth nothing to a roster that spends picks on single-slot positions. The 2.5pp figure does not bound this, and `real_season_champion` should be treated as **defective for comparing rosters of different shapes**.
+**Backtest lineups are set ex ante — this was changed, and the old behaviour was a real defect.** `real_season_champion` originally chose each week's lineup from *realized* scores. Quantified early on at "max 2.5pp swing" on real 2024 rosters, with a caveat that those rosters were not variance-stacked. **That caveat proved to be the important part — see §7b test 6.** For a *depth*-stacked roster (15 FLEX-eligible players, which is exactly what ADP-following produces) hindsight is worth **5.75pp**, and worth nothing to a roster spending picks on single-slot positions — so it silently decided the backtest.
+
+Since commit `2b845cc`, lineups are chosen on **projected means** and scored on **realized points**; weekly availability stays real, because a manager does know who is inactive, it is the scores they cannot see. Note this applies to the *backtest*. The forward-looking season simulator (`sim/season.py`) samples scores it then optimises against, which is a different and legitimate use — there is no hindsight when the scores are drawn from the model's own distributions.
 
 ## 6. Key measured findings
 
