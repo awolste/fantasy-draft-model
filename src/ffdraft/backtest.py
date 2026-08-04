@@ -174,8 +174,8 @@ class FitReport:
             f"opponent model (league_drafts):       seasons {self.opponent_model_seasons}",
             f"replacement level (weekly_stats):     seasons {self.replacement_seasons[0]}-{self.replacement_seasons[1]}",
             f"availability (schedules/rosters):     seasons {self.availability_seasons[0]}-{self.availability_seasons[-1]}",
-            f"2024 ADP (input, not leakage):        season {self.holdout_season}",
-            f"2024 real weekly results (scoring only): season {self.holdout_season}",
+            f"holdout ADP (input, not leakage):    season {self.holdout_season}",
+            f"holdout real weekly results (scoring only): season {self.holdout_season}",
         ]
         return "\n".join(lines)
 
