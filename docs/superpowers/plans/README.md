@@ -1,5 +1,7 @@
 # Plan Index
 
+> **Picking this project up cold? Start with [`docs/HANDOFF.md`](../../HANDOFF.md)** — current status, decisions made and why, open items, and the recurring failure pattern. Then come back here for the stage roadmap.
+
 **Read this first if you are picking up this project.**
 
 1. Read the design spec: [`../specs/2026-08-02-ff-draft-2026-design.md`](../specs/2026-08-02-ff-draft-2026-design.md). It contains the league configuration, the approach and why alternatives were rejected, and the validation gate. Do not re-litigate decisions recorded there without a reason.
