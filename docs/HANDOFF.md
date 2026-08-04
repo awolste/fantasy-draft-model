@@ -108,7 +108,7 @@ These were deliberate. Do not silently reverse them.
 
 **Blocking the headline deliverable:**
 
-1. **Task 6 — the backtest has been run, and the engine loses.** `scripts/backtest.py` / `src/ffdraft/backtest.py`. Full leakage audit passed (every fitted component checked against seasons through 2023 only; see `tests/test_backtest.py::test_fit_report_seasons_never_include_the_holdout_season`). N=600 draft realizations, same-seed paired comparison: **engine 3.00% ± 0.70% SE vs. ADP-baseline 16.50% ± 1.52% SE — engine minus ADP = −13.50pp ± 1.65pp SE**, an ~8-sigma deficit, not noise. Random-legal scored 0.00%, so the engine barely clears a policy with no skill at all. The gap concentrates in rounds 3–6 (mean real-2024 points-per-game of our picks there trails ADP's picks at the same slot by 2-3 ppg; picks 1-2 are roughly at parity or slightly ahead). Leading hypothesis, not yet confirmed: the engine's early, aggressive QB investment (this league's real, documented 6-pt-TD edge) is real in-model but costs too much draft capital in practice, and/or the through-2023 fitted projections diverge from real 2024 outcomes more than the market's own real-time ADP does (ADP prices in current-year depth-chart/coaching information a backward-looking statistical fit cannot see). **This needs follow-up investigation before Stage 4** — do not treat the engine as validated. Report full detail in the Task 6 report (ask the coordinator for it if not preserved elsewhere).
+1. **Task 6 — the backtest has been run, and the engine loses.** `scripts/backtest.py` / `src/ffdraft/backtest.py`. Full leakage audit passed (every fitted component checked against seasons through 2023 only; see `tests/test_backtest.py::test_fit_report_seasons_never_include_the_holdout_season`). N=600 draft realizations, same-seed paired comparison: **engine 3.00% ± 0.70% SE vs. ADP-baseline 16.50% ± 1.52% SE — engine minus ADP = −13.50pp ± 1.65pp SE**, an ~8-sigma deficit, not noise. Random-legal scored 0.00%, so the engine barely clears a policy with no skill at all. The gap concentrates in rounds 3–6 (mean real-2024 points-per-game of our picks there trails ADP's picks at the same slot by 2-3 ppg; picks 1-2 are roughly at parity or slightly ahead). **Do not treat the engine as validated.** Diagnosis is under way — see §7b below for what has already been ruled out.
 2. **Task 7 — the structure study has not been run.** 0RB vs Hero RB vs 2RB:1WR from slot 8, with error bars. Structures currently differentiate only modestly in position counts (0RB ends RB3/WR8, 2RB ends RB4/WR7) but differ substantially in player quality, which is what the comparison measures. Given RB≈WR over replacement, **be suspicious of any large structural edge** and investigate before believing it.
 
 **Known defects and unresolved questions:**
@@ -120,6 +120,56 @@ These were deliberate. Do not silently reverse them.
 7. **`sources/nflverse.py` imports `models/kicking.py`** — a Stage 1 → Stage 2 layering inversion. Cheap to fix by moving `kicking.py` beside `scoring.py`.
 8. **Python runs under Rosetta x86-64 emulation**, not native ARM. Polars warns it may crash, and one full-suite run segfaulted when two heavy Polars processes ran concurrently. Switching to a native ARM Python is worth doing before more heavy simulation work.
 9. **`data/manager_labels.csv` is filled in** with real manager names (gitignored). Never read, print, or commit it.
+
+## 7b. Diagnosing the backtest failure — state as of 2026-08-04
+
+Three hypotheses were posed for the 13.5pp deficit:
+
+- **A — wasted roster spots.** Every rollout ends QB=3, K=2, both exactly at the `MAX_EXTRA_BENCH_NO_FLEX` caps, versus opponents' ~1.7 QB and ~1.2 K. Roughly 3 picks on near-worthless players.
+- **B — stale information.** Live ADP prices in current-season knowledge (camp battles, trades, coaching changes) that a fit through 2023 cannot see.
+- **C — the value function's cross-positional reasoning is mis-specified**, independent of A and B.
+
+### Test 1 — RULED OUT hypothesis B (complete)
+
+Spearman correlation against **actual 2024 points per game**, using `fit_holdout_context(fit_through_season=2023, holdout_season=2024)`, players with ≥4 games (n=473):
+
+| Position | our projected mean | ADP rank | n |
+|---|---|---|---|
+| QB | 0.737 | 0.735 | 59 |
+| RB | 0.777 | 0.774 | 115 |
+| WR | 0.652 | 0.656 | 197 |
+| TE | 0.465 | 0.458 | 102 |
+| **cross-position** | **0.674** | 0.650 | 473 |
+
+**Within position, our projections and ADP are the same predictor to three decimals.** This is structural, not coincidental: `rankings_holdout` is built by sorting 2024 ADP, so `pool[pid].rank` *is* ADP rank, and the rank curve is monotone decreasing in it — we reproduce ADP's within-position ordering by construction. Cross-position we are slightly *better*, as expected from mapping ranks onto a common points scale.
+
+**Consequence:** the deficit cannot originate in the projections. We carry the market's information faithfully and add a little. It must originate in the **decision layer** — how `value.py` turns projections into picks. That leaves A and C.
+
+A corollary worth knowing: because there is no within-position disagreement between us and ADP, **every disagreement is cross-positional**. Any analysis looking for "players we overrate" within a position will find nothing.
+
+### Test 2 — the ladder (in progress at time of writing)
+
+Six contenders, N=600, common random numbers, same opponent seeds:
+
+`engine`, `adp`, `consensus`, `random`, `proj_mean` (draft by our projected mean directly, no VOR, no roster-awareness), `engine_capped` (QB≤2, K≤1).
+
+The two comparisons that carry the diagnosis:
+
+- **`proj_mean` vs `adp`** — expected to be close, given Test 1. If it is not, something is wrong in how the pool orders players *across* positions.
+- **`proj_mean` vs `engine`** — **the critical rung.** If `proj_mean` lands near 16.5% while `engine` sits at 3%, then VOR and roster-awareness are destroying ~13pp on their own.
+- **`engine` vs `engine_capped`** — apportions how much is hypothesis A.
+
+If `engine_capped` closes only a small part of the gap, the problem is the framing rather than the guard.
+
+### The hypothesis worth stating plainly
+
+**Value-over-replacement may simply be mis-specified for this league.** VOR exists to price positional scarcity. But this league has two FLEX slots, weekly lineup optimization, and an ordinary waiver wire — and Stage 2 measured RB and WR starters as worth nearly identical amounts over replacement (6.4 vs 6.5 points/week). If positions are that interchangeable, scarcity has little left to price, and VOR's adjustments become noise layered on a signal that was already correct.
+
+This project assumed VOR was correct throughout: `value.py`, the candidate pruning, and the rollout policy all rest on it. It has never been validated against a simpler best-available-by-projection policy. The `proj_mean` rung is that validation.
+
+### Minor issue noticed in passing
+
+The holdout pool excludes 15 unmatched players, including **Hollywood Brown at rank 86** — genuinely draftable in 2024, and the same name-normalization gap as Stage 1 (he is "Marquise Brown" in the crosswalk). Too small to explain 13.5pp, and it handicaps every contender equally rather than biasing between them, but worth fixing.
 
 ## 8. The recurring failure pattern — read this before trusting any number
 
@@ -135,6 +185,8 @@ A partial list:
 - A survivorship-bias trap made running backs look as durable as quarterbacks
 - Return TDs scored 0 instead of 6 for 151 real rows
 - The draft policy drafted **six quarterbacks and two running backs**, giving us 5.68% title odds against a 10% baseline — while the pick-8 recommendation list it produced looked entirely reasonable
+
+- The engine itself lost to naive ADP-following by 13.5pp on real 2024 results — while producing recommendation lists that read as entirely sensible, and while every component beneath it had been individually verified
 
 **The lesson that generalizes:** verify at the level of the artifact that matters, not the level of the component. A unit test on the value function passed while the policy built an absurd roster. The check that caught it was inspecting the *rosters the policy produces*. Similarly, the calibration test that mattered compared modelled quantiles against observed data, not against themselves.
 
