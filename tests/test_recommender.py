@@ -115,9 +115,10 @@ def test_recommend_pick_ranks_a_clearly_dominant_player_first():
 def test_recommend_pick_respects_roster_need_for_a_deep_position():
     # Our team already has 2 competitive QBs rostered (one already the
     # starter); a 3rd QB that is not a clear upgrade over the incumbent
-    # starter only ever offers bench value (see draft.value's
-    # BENCH_DISCOUNT), while every other available player still has an
-    # empty starting slot to fill -- so the 3rd QB should not top the list.
+    # starter only ever offers depth/FLEX-capacity-discounted bench value
+    # (see draft.value's `_bench_value` -- QB has no FLEX recourse, so this
+    # decays fast), while every other available player still has an empty
+    # starting slot to fill -- so the 3rd QB should not top the list.
     # The gap is made large and deliberate so this holds regardless of
     # rollout noise: with such a low greedy value, "qb_star" should not
     # even survive candidate pruning (a rollout-randomness-free step),

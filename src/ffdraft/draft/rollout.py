@@ -66,8 +66,137 @@ Reasons:
 
 This is a known limitation, not an oversight: a rollout can occasionally
 produce a same-position pair at the turn where a human would visibly
-diversify. See `tests/test_rollout.py` for the plausibility check on a
-sampled rollout's first two rounds.
+diversify (see `tests/test_rollout.py` for the plausibility check on a
+sampled rollout's first two rounds).
+
+## Greedy value alone is not enough: the RB2/QB5 incident
+
+A second, larger incident (after `draft/value.py`'s own bench-value fixes)
+surfaced only once real rollouts were run across many seeds: our own
+greedy-value-driven roster converged, *every single seed*, to exactly 2
+RBs and 4-5 QBs, while the opponent model (fit on real historical drafts)
+averaged ~4.8 RBs and ~1.6 QBs. RB is this league's least-available
+position (80.4% weekly, and Stage 2's own finding); ending every draft
+with zero RB bench is a real handicap, not a quirk of one bad seed.
+
+**Why this is not fixable by a better *value* formula alone -- proven, not
+assumed.** The natural instinct is "price bench value by expected starts
+across the whole 14-week season, not a single week's snapshot." This
+provably cannot change anything: `WeeklyDistribution`/`PlayerAvailability`
+seed every player's week-0 state in the chain's *stationary* distribution
+(see `models/availability.py`), so by linearity of expectation, the
+expected number of qualifying weeks over a 14-week season is exactly `14 x
+P(a single week qualifies)` -- a constant rescale of what `draft.value`
+already computes, regardless of persistence. Persistence changes how
+outages *cluster in time* (variance/timing), not the *expected total*
+insurance value. A "season-aware expected value" reformulation is
+therefore mathematically rank-invariant to the per-week reachability
+`draft.value` already uses. (A tempting alternative -- weight bench value
+by each position's *expected outage duration*, `1/(1-persistence)` -- was
+checked directly against the real fitted rates and makes the problem
+*worse*, not better: QB's fitted persistence (0.833, ~6-week average
+absences) is higher than RB's (0.739, ~3.8 weeks) or WR's (0.733, ~3.75
+weeks) in this data, so duration-weighting would inflate QB bench value
+relative to RB, the opposite of what's needed.)
+
+The real cause is not a pricing error but a genuine blind spot of any
+mean-only proxy: championship probability is a *nonlinear* function of a
+roster's points (a persistent, multi-week absence with no bench cover is
+disproportionately costly if it lands during a playoff push), and a
+"roughly right, fast, no-sampling" greedy value function is asked to
+optimize a *linear* (expected-points) proxy for that nonlinear objective
+by design (see `draft/value.py`'s own module docstring, "the season
+simulator remains the source of truth for anything that matters enough to
+spend a Monte Carlo budget on"). There is also a real, non-buggy mechanical
+contributor once a position's own dedicated slots are full: `solve_lineup`
+prices an empty FLEX slot at the *best* of RB/WR/TE's replacement means
+(WR's, in this league), so every FLEX-eligible position's *bench* value is
+judged against that same, WR-favoring bar -- correct for what `solve_lineup`
+actually does, but it structurally advantages the position whose own
+replacement level happens to be highest, independent of real season-long
+risk.
+
+**Decision: a policy-level guard on `_choose_our_pick`, not a further
+change to `draft.value`'s pricing.** Since the value function's own math is
+provably already doing the best a mean-only, no-sampling proxy can do, the
+fix has to live in the *policy* that consumes it, mirroring how the
+opponent model (fit on real human/ADP behavior) already encodes roster-need
+behavior it did not have to derive from first principles either
+(`models.opponent`'s `roster_decay`). Two guards, both derived from
+`league.STARTERS`/`FLEX_ELIGIBLE` (never a hardcoded target roster shape),
+apply only once our own starting lineup is otherwise fillable
+(`len(roster_pairs) >= starting_slots_total()`) -- see
+`_positions_below_bench_floor`/`_positions_at_or_above_bench_ceiling`:
+
+- **A minimum bench floor** (`MIN_BENCH_PER_FLEX_POSITION`, currently 1):
+  every FLEX-eligible position must reach at least one bench body beyond
+  its own dedicated starter count before candidates outside the
+  under-floor position(s) are even considered. This is the "fill starters,
+  then buy insurance" behavior the coordinator's own diagnosis names, made
+  literal and general -- it does not say *how much* insurance beyond the
+  floor, which stays fully greedy.
+- **A bench ceiling** (`MAX_EXTRA_BENCH_NO_FLEX`, currently `{"QB": 2, "K":
+  1}`) on non-FLEX-eligible, non-DST positions only: once every
+  FLEX-eligible position clears its floor, a QB beyond 3 total or a K
+  beyond 2 total is excluded from consideration. This is not a new
+  assumption -- `draft.value`'s own proven decay curve
+  (`tests/test_value.py::test_qb_bench_value_decays_with_depth`) already
+  shows a 4th/5th QB's value is near zero, and K's fitted availability
+  (93.4%, the highest of any position) makes even a single backup nearly
+  valueless; the ceiling just removes the noise/near-ties that otherwise
+  let that near-zero value edge out a genuinely useful FLEX-eligible bench
+  pick.
+- **DST is deliberately untouched by either guard.** Every DST shares the
+  exact same distribution as DST's own replacement level (see
+  `models/roster.py`'s docstring, "DST has no separate replacement
+  level"), so a drafted DST is worth precisely zero marginal value -- the
+  value function's conclusion here is correct, not a blind spot, and a
+  floor/ceiling would fight it rather than compensate for it.
+
+## Why the floor must depend on what was drafted, not just STARTERS
+
+**A fixed floor of `starters[pos] + 1` for every FLEX-eligible position,
+identical regardless of what was actually drafted, was tried first and
+failed the structure-differentiation check.** `starters['RB']` is `2`
+whatever a rollout's opening looked like, so a fixed floor of `3` total RB
+converges *any* structure to exactly 3 RBs once the guard activates,
+whether it opened 0RB (0 real RBs by round 3, the floor mechanism supplies
+exactly one late) or 2RB (2 elite RBs by round 2, the floor supplies
+exactly one more) -- checked directly: forcing WR/WR/WR vs. RB/RB/WR into
+picks 8/13/28 and running the rest of an 18-round rollout from each
+produced the *identical* final position mix, every seed
+(`{RB:3, QB:3, WR:8, TE:2, K:2}`) -- the exact failure mode the structure
+study cannot tolerate, because a floor keyed only on the league-wide
+`STARTERS` constant cannot, by construction, know or reflect which
+structure produced the roster in front of it.
+
+**The fix: the floor must scale with the *quality* of what's already
+rostered, not just a position-count constant.** `ELITE_STARTER_BENCH_BONUS`
+adds one extra required bench slot to a FLEX-eligible position once it
+holds at least one *elite* dedicated starter -- ranked inside the league's
+total dedicated-slot count for that position (`starters[pos] * n_teams`,
+i.e. good enough to start on every team in a league this size). A 2RB
+opening's early picks are, definitionally, elite RBs (that is what "2RB"
+means as a structure), so its RB floor becomes 4, not 3; a 0RB opening's
+eventual floor-triggered RB pickup is a mid/late-round player who does not
+clear the elite-rank bar, so its floor stays at 3. This is derived
+entirely from real `PlayerDistribution.rank` and `league.STARTERS`/
+`N_TEAMS` -- never a target roster shape or a position-specific "want more
+RB" rule -- and it re-derives a different number for every structure
+*because* it is a function of what that structure actually drafted, not a
+constant applied identically to all of them.
+
+**Why this still does not predetermine Task 7's structure study.** The
+mechanism is symmetric across every FLEX-eligible position (a 2RB
+opening's *WR* floor is unaffected, since it drafted no elite WRs early;
+a 0RB opening's *WR* floor gets the same elite bonus RB's floor would have
+gotten, symmetrically, since 0RB's early picks are the elite WRs). It does
+not say "RB insurance matters more than WR insurance" -- it says "insurance
+matters more for whichever position you already invested elite capital in,
+whichever position that turns out to be." See
+`tests/test_rollout.py::test_structure_smoke_0rb_vs_2rb_produce_different_final_shapes`
+for the check that forcing 0RB vs. 2RB into the first three picks now
+produces genuinely different final rosters, not a shared attractor.
 
 ## ADP for the opponent model
 
@@ -124,7 +253,7 @@ from typing import Mapping, Sequence
 import numpy as np
 import polars as pl
 
-from ..league import DRAFT_ROUNDS, DRAFT_SLOT, N_TEAMS
+from ..league import DRAFT_ROUNDS, DRAFT_SLOT, FLEX_ELIGIBLE, N_TEAMS, STARTERS, starting_slots_total
 from ..models.base import WeeklyDistribution
 from ..models.distribution import PlayerDistribution
 from ..models.opponent import (
@@ -400,18 +529,134 @@ def _our_roster_players(
     ]
 
 
+# ---------------------------------------------------------------------------
+# Greedy-policy myopia guard -- see module docstring, "Greedy value alone is
+# not enough: the RB2/QB5 incident".
+
+MIN_BENCH_PER_FLEX_POSITION = 1
+"""Every FLEX-eligible position (RB/WR/TE) gets at least this many real
+bench bodies beyond its own dedicated starter count, once our own starting
+lineup is otherwise fillable. See module docstring."""
+
+MAX_EXTRA_BENCH_NO_FLEX: Mapping[str, int] = {"QB": 2, "K": 1}
+"""Non-FLEX-eligible, non-DST positions (QB, K) are capped at their own
+dedicated starter count plus this many bench bodies -- i.e. QB tops out at
+3 total (1 starter + 2 bench), K at 2 total (1 starter + 1 bench). Not a
+new assumption -- these enforce what `draft.value`'s own proven decay curve
+already says these slots are worth once the count is this deep (see
+`tests/test_value.py::test_qb_bench_value_decays_with_depth`), removing
+noise/near-ties that otherwise let a near-zero-value pick edge out a
+genuinely useful FLEX-eligible bench player. K's multiple is tighter than
+QB's because K has this league's *highest* fitted availability (93.4%,
+`models/availability.py`) -- a backup kicker has essentially no bye-week or
+injury-insurance case at all, unlike a backup QB's small-but-real one (see
+`tests/test_value.py`'s QB2/QB3 values)."""
+
+
+ELITE_STARTER_BENCH_BONUS = 1
+"""Extra bench-floor slots (on top of `MIN_BENCH_PER_FLEX_POSITION`) for a
+FLEX-eligible position once it holds at least one *elite* dedicated
+starter -- a rostered player whose within-position rank is inside the
+league's total dedicated-slot count for that position
+(`starters[pos] * n_teams`, i.e. he would start on every team in a league
+this size, not just a marginally-startable one). This is the piece that
+makes the floor track *what was actually drafted*, not a fixed constant
+identical for every structure -- see module docstring, "Why the floor must
+depend on what was drafted, not just STARTERS"."""
+
+
+def _elite_starter_bonus(
+    position: str,
+    roster_pairs: Sequence[tuple[str, str]],
+    pool: Mapping[str, PlayerDistribution],
+    n_teams: int,
+) -> int:
+    if position not in FLEX_ELIGIBLE:
+        return 0
+    starter_slots = STARTERS.get(position, 0) * n_teams
+    for player_id, pos in roster_pairs:
+        if pos != position:
+            continue
+        entry = pool.get(player_id)
+        if entry is not None and entry.rank <= starter_slots:
+            return ELITE_STARTER_BENCH_BONUS
+    return 0
+
+
+def _bench_floor(
+    position: str,
+    roster_pairs: Sequence[tuple[str, str]],
+    pool: Mapping[str, PlayerDistribution],
+    n_teams: int,
+) -> int:
+    return (
+        STARTERS.get(position, 0)
+        + MIN_BENCH_PER_FLEX_POSITION
+        + _elite_starter_bonus(position, roster_pairs, pool, n_teams)
+    )
+
+
+def _positions_below_bench_floor(
+    roster_counts: Mapping[str, int],
+    roster_pairs: Sequence[tuple[str, str]],
+    pool: Mapping[str, PlayerDistribution],
+    n_teams: int,
+) -> list[str]:
+    return [
+        pos
+        for pos in sorted(FLEX_ELIGIBLE)
+        if roster_counts.get(pos, 0) < _bench_floor(pos, roster_pairs, pool, n_teams)
+    ]
+
+
+def _positions_at_or_above_bench_ceiling(roster_counts: Mapping[str, int]) -> set[str]:
+    # DST is deliberately excluded from the ceiling (there is nothing to
+    # cap -- see module docstring) and FLEX-eligible positions are excluded
+    # (they have no ceiling here at all; only the floor above applies to
+    # them).
+    return {
+        pos
+        for pos, extra in MAX_EXTRA_BENCH_NO_FLEX.items()
+        if roster_counts.get(pos, 0) >= STARTERS.get(pos, 0) + extra
+    }
+
+
 def _choose_our_pick(
     available_ids: Sequence[str],
     pool: Mapping[str, PlayerDistribution],
     roster_pairs: Sequence[tuple[str, str]],
     replacement_means: Mapping[str, float],
     replacement_by_position: Mapping[str, WeeklyDistribution],
+    n_teams: int = N_TEAMS,
 ) -> tuple[str, str]:
     """Greedily pick the highest-`value.py`-value available player for our
-    own roster so far. See module docstring for why pairs at the turn are
-    not jointly optimized."""
+    own roster so far, after the bench floor/ceiling guard (module
+    docstring) narrows the candidate set. See module docstring for why
+    pairs at the turn are not jointly optimized."""
     roster = _our_roster_players(roster_pairs, pool, replacement_by_position)
-    values = value_available(list(available_ids), pool, roster, replacement_means)
+
+    candidate_ids = list(available_ids)
+    if len(roster_pairs) >= starting_slots_total():
+        # Only once our own starting lineup is otherwise fillable -- early
+        # picks are already governed correctly by `draft.value`'s own
+        # (large, unambiguous) starter-slot marginal values.
+        roster_counts: dict[str, int] = {}
+        for _, position in roster_pairs:
+            roster_counts[position] = roster_counts.get(position, 0) + 1
+
+        below_floor = _positions_below_bench_floor(roster_counts, roster_pairs, pool, n_teams)
+        if below_floor:
+            floor_ids = [pid for pid in candidate_ids if pool[pid].position in below_floor]
+            if floor_ids:
+                candidate_ids = floor_ids
+        else:
+            at_ceiling = _positions_at_or_above_bench_ceiling(roster_counts)
+            if at_ceiling:
+                remaining_ids = [pid for pid in candidate_ids if pool[pid].position not in at_ceiling]
+                if remaining_ids:
+                    candidate_ids = remaining_ids
+
+    values = value_available(candidate_ids, pool, roster, replacement_means)
     best = max(values, key=lambda v: v.value)
     return best.player_id, best.position
 
@@ -492,7 +737,8 @@ def run_rollout(
 
         if team == our_team:
             player_id, position = _choose_our_pick(
-                available_ids, pool, rosters[team], replacement_means, replacement_by_position
+                available_ids, pool, rosters[team], replacement_means, replacement_by_position,
+                n_teams=state.n_teams,
             )
         else:
             candidates = [

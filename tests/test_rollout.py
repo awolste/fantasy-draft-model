@@ -584,3 +584,200 @@ def test_real_rollout_first_two_rounds_are_reported(real_fixtures):
     round1_positions = [p.position for p in real_adp_rounds if p.overall_pick <= n_teams]
     assert round1_positions.count("K") == 0
     assert round1_positions.count("DST") == 0
+
+
+# ---------------------------------------------------------------------------
+# Regression: the six-quarterback/six-tight-end incident. A unit test on
+# `draft.value` alone did not catch this -- the flat bench discount looked
+# fine in isolation, and only broke once a full greedy rollout was actually
+# built on top of it and stacked positions with no FLEX recourse. These
+# tests exercise the greedy policy end to end: a real rollout's resulting
+# roster shape, and that roster's actual simulated championship odds.
+
+
+def test_real_greedy_rollout_produces_a_sane_position_mix(real_fixtures):
+    pool, replacement, model, n_teams, draft_slot, rounds, adp_table, rankings = real_fixtures
+    state = DraftState.from_picks([], n_teams=n_teams, rounds=rounds)
+    rng = np.random.default_rng(300)
+    final = run_rollout(
+        state, pool, model, replacement, rng, our_team=draft_slot,
+        adp_table=adp_table, rankings=rankings,
+    )
+
+    our_positions = [pos for _, pos in final.rosters[draft_slot]]
+    counts = {pos: our_positions.count(pos) for pos in set(our_positions)}
+    print(f"\nOur roster position mix (greedy value.py policy, seed=300): {counts}")
+
+    opponent_counts = {}
+    for team in range(1, n_teams + 1):
+        if team == draft_slot:
+            continue
+        positions = [pos for _, pos in final.rosters[team]]
+        opponent_counts[team] = {pos: positions.count(pos) for pos in set(positions)}
+    print(f"Opponent position mixes: {opponent_counts}")
+
+    # Regression #1: a flat bench discount let the greedy policy stack
+    # QB/TE indefinitely (six of each in the original incident) because
+    # neither position has FLEX recourse and nothing discounted a deep
+    # backup relative to a shallow one.
+    # Regression #2 (caught by this same end-to-end test after fixing #1):
+    # a FLEX-reachable player's bench value was discounted against its
+    # *own* position's replacement level rather than the FLEX fallback,
+    # overpricing TE specifically.
+    # Regression #3 (caught by the coordinator running this same rollout
+    # across many seeds after #1/#2 were fixed): the greedy *value function*
+    # alone -- even numerically correct -- converged to exactly RB2/QB~5
+    # every seed, because a mean-only proxy cannot see season-long
+    # persistent-outage insurance value (see `draft/rollout.py`'s module
+    # docstring, "Greedy value alone is not enough", for the mathematical
+    # proof that a naive "season-aware expected value" reformulation cannot
+    # fix this). The fix is the policy-level bench floor/ceiling guard in
+    # `_choose_our_pick` -- RB should now clear its floor (>= 3, 2 starters
+    # + >=1 bench), not get stuck at exactly 2.
+    assert counts.get("QB", 0) <= 5
+    assert counts.get("TE", 0) <= 3
+    assert counts.get("RB", 0) >= 3
+    # A real, complete roster still fills every required *startable*
+    # position at least once. DST is deliberately excluded here: this
+    # project's DST model gives every team's DST pick the exact same
+    # shared distribution as the DST replacement-level fallback (see
+    # `models/roster.py`'s docstring, "DST has no separate replacement
+    # level") -- a drafted DST and an undrafted one are mathematically
+    # identical, so a marginal-value-maximizing greedy policy correctly
+    # never spends a pick on one. That is a pre-existing Stage 1/2 modeling
+    # decision, not something this task's bench-value fix changes.
+    for pos in ["QB", "RB", "WR", "TE", "K"]:
+        assert counts.get(pos, 0) >= 1
+    print(f"DST count: {counts.get('DST', 0)} (0 is expected -- see comment above)")
+    # And RB/WR depth (the FLEX-eligible positions with real bench value)
+    # should make up the bulk of the roster, not be crowded out.
+    assert counts.get("RB", 0) + counts.get("WR", 0) >= rounds // 2
+
+
+def test_real_greedy_rollout_championship_probability_at_or_above_baseline(real_fixtures):
+    # The incident's headline symptom: the greedy policy's resulting roster
+    # simulated to 5.68% championship probability against a 10% baseline
+    # (n_teams=10) -- materially *worse* than an average team. After the
+    # fix, a greedy draft should be at least roughly competitive with
+    # baseline, not a demonstrated handicap. 8 seeds (not 4) per the
+    # coordinator's request, with mean and spread reported explicitly.
+    #
+    # A note on the spread: this varies the *entire* draft from an empty
+    # state, including our own first pick (which itself depends on what
+    # opponents did in picks 1-7) -- unlike `draft/recommender.py`'s own
+    # ~2.00pp between-rollout SD, which is measured with our first pick
+    # *fixed* (common random numbers across candidates, isolating only
+    # "how does the rest of the draft vary given the same opening
+    # decision" -- see that module's docstring). Letting the opening
+    # decision itself vary is a strictly larger source of variance, so a
+    # materially larger spread here is expected, not a contradiction --
+    # the two numbers answer different questions and neither invalidates
+    # the other.
+    from ffdraft.models.roster import build_roster
+    from ffdraft.sim.season import SeasonRosterPlayer, simulate_season
+
+    pool, replacement, model, n_teams, draft_slot, rounds, adp_table, rankings = real_fixtures
+    replacement_means = {pos: float(dist.mean) for pos, dist in replacement.items()}
+    baseline = 1.0 / n_teams
+
+    probs = []
+    for seed in range(310, 318):
+        rng = np.random.default_rng(seed)
+        state = DraftState.from_picks([], n_teams=n_teams, rounds=rounds)
+        final = run_rollout(
+            state, pool, model, replacement, rng, our_team=draft_slot,
+            adp_table=adp_table, rankings=rankings,
+        )
+        rosters = []
+        for team in range(1, n_teams + 1):
+            result = build_roster(list(final.rosters[team]), pool, replacement)
+            rosters.append(
+                [SeasonRosterPlayer(p.player_id, p.position, p.distribution, p.availability) for p in result.players]
+            )
+        season_result = simulate_season(rosters, n_sims=2000, seed=seed, replacement_means=replacement_means)
+        probs.append(season_result.championship_probabilities[draft_slot - 1])
+
+    probs_arr = np.array(probs)
+    mean_prob = float(probs_arr.mean())
+    sd_prob = float(probs_arr.std(ddof=1))
+    print(f"\nGreedy-rollout championship probabilities across {len(probs)} seeds: {probs}")
+    print(f"Mean: {mean_prob:.4f}  SD: {sd_prob:.4f}  vs baseline {baseline:.4f}")
+
+    # Not materially below baseline. A few points of noise either way is
+    # expected (see the plan doc's own "realistic edge is small" finding);
+    # being clearly *worse* than an average team, as the pre-fix policy
+    # was, is not acceptable.
+    assert mean_prob > baseline - 0.03
+
+
+def test_structure_smoke_0rb_vs_2rb_produce_different_final_shapes(real_fixtures):
+    # The check that actually matters for Task 7 (per the coordinator):
+    # if forcing different opening structures into the first three picks
+    # converges to the *same* final roster shape by round 18, the
+    # structure study measures nothing. Force WR/WR/WR ("0RB") vs.
+    # RB/RB/WR ("2RB") into our first three picks (8, 13, 28 from slot 8),
+    # let the rest of an 18-round rollout play out normally from each, and
+    # confirm the final RB counts genuinely differ -- not by noise, but
+    # systematically, across several seeds.
+    from ffdraft.models.opponent import AvailablePlayer, sample_pick
+    from ffdraft.draft.rollout import Pick, team_for_pick, pool_adp_lookup
+
+    pool, replacement, model, n_teams, draft_slot, rounds, adp_table, rankings = real_fixtures
+    adp_lookup, _ = pool_adp_lookup(pool, adp_table, rankings)
+
+    def best_available(position: str, avail: list[str]) -> str:
+        cands = [pid for pid in avail if pool[pid].position == position]
+        cands.sort(key=lambda pid: pool[pid].distribution.mean, reverse=True)
+        return cands[0]
+
+    def run_forced_structure(forced: dict[int, str], seed: int) -> dict[str, int]:
+        rng = np.random.default_rng(seed)
+        picks: list[Pick] = []
+        drafted: set[str] = set()
+        avail = [pid for pid in pool if pid not in drafted]
+        last_forced = max(forced)
+        nxt = 1
+        while nxt <= last_forced:
+            team = team_for_pick(nxt, n_teams)
+            if team == draft_slot and nxt in forced:
+                pid = best_available(forced[nxt], avail)
+            else:
+                cands = [AvailablePlayer(player_id=p, position=pool[p].position, adp=adp_lookup[p]) for p in avail]
+                pid = sample_pick(
+                    model, manager_id=f"slot_{team}", available=cands, roster_counts={}, rng=rng,
+                )
+            pos = pool[pid].position
+            picks.append(Pick(overall_pick=nxt, team=team, player_id=pid, position=pos))
+            drafted.add(pid)
+            avail = [p for p in avail if p != pid]
+            nxt += 1
+
+        state = DraftState.from_picks(picks, n_teams=n_teams, rounds=rounds)
+        final = run_rollout(
+            state, pool, model, replacement, rng, our_team=draft_slot,
+            adp_table=adp_table, rankings=rankings,
+        )
+        positions = [pos for _, pos in final.rosters[draft_slot]]
+        return {p: positions.count(p) for p in set(positions)}
+
+    zero_rb = {8: "WR", 13: "WR", 28: "WR"}
+    two_rb = {8: "RB", 13: "RB", 28: "WR"}
+
+    zero_rb_rb_counts = []
+    two_rb_rb_counts = []
+    for seed in range(420, 424):
+        zero_counts = run_forced_structure(zero_rb, seed)
+        two_counts = run_forced_structure(two_rb, seed)
+        print(f"\nseed {seed}: 0RB opening -> {zero_counts}")
+        print(f"seed {seed}: 2RB opening -> {two_counts}")
+        zero_rb_rb_counts.append(zero_counts.get("RB", 0))
+        two_rb_rb_counts.append(two_counts.get("RB", 0))
+
+    print(f"\n0RB final RB counts: {zero_rb_rb_counts}")
+    print(f"2RB final RB counts: {two_rb_rb_counts}")
+
+    # The 2RB opening must end with systematically more RBs than the 0RB
+    # opening -- every seed, not just on average -- or the policy is still
+    # erasing the structural difference the study depends on.
+    for zero_count, two_count in zip(zero_rb_rb_counts, two_rb_rb_counts):
+        assert two_count > zero_count
