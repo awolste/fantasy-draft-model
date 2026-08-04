@@ -36,9 +36,9 @@ Full K and DST scoring rules are in the spec. Two bands are **neutral, not missi
 | 3 | Opponent model + optimizer | **5 of 7 tasks**, on branch `stage-3-optimizer` |
 | 4 | Live draft assistant | Not started, no plan written |
 
-**Branch `stage-3-optimizer` is ahead of `main` and unmerged. 342 tests pass.** Suite takes ~12 minutes.
+**Branch `stage-3-optimizer` is ahead of `main` and unmerged. 360 tests pass** (342 + 18 new backtest tests). Suite takes ~11-12 minutes.
 
-Stage 3 remaining: **Task 6 (the backtest — the gate)** and **Task 7 (the structure study — the headline deliverable)**.
+Stage 3 remaining: **Task 7 (the structure study — the headline deliverable)**. Task 6 (the backtest) is done, and it failed the gate: the engine loses to naive ADP-following on real 2024 results by 13.5pp ± 1.65pp — see item 1 below. **Task 7 should not proceed on the assumption the engine works** until this is investigated.
 
 ## 4. Architecture
 
@@ -108,7 +108,7 @@ These were deliberate. Do not silently reverse them.
 
 **Blocking the headline deliverable:**
 
-1. **Task 6 — the backtest has not been run.** This is the gate that decides whether the engine beats ADP-following. Hold out 2024, fit through 2023, draft from slot 8, score on **real** 2024 weekly results, compare to three baselines, report by round. Expect a few percentage points at most; a large edge means leakage. Check the holdout is genuinely clean — an earlier calibration was found to be slightly in-sample.
+1. **Task 6 — the backtest has been run, and the engine loses.** `scripts/backtest.py` / `src/ffdraft/backtest.py`. Full leakage audit passed (every fitted component checked against seasons through 2023 only; see `tests/test_backtest.py::test_fit_report_seasons_never_include_the_holdout_season`). N=600 draft realizations, same-seed paired comparison: **engine 3.00% ± 0.70% SE vs. ADP-baseline 16.50% ± 1.52% SE — engine minus ADP = −13.50pp ± 1.65pp SE**, an ~8-sigma deficit, not noise. Random-legal scored 0.00%, so the engine barely clears a policy with no skill at all. The gap concentrates in rounds 3–6 (mean real-2024 points-per-game of our picks there trails ADP's picks at the same slot by 2-3 ppg; picks 1-2 are roughly at parity or slightly ahead). Leading hypothesis, not yet confirmed: the engine's early, aggressive QB investment (this league's real, documented 6-pt-TD edge) is real in-model but costs too much draft capital in practice, and/or the through-2023 fitted projections diverge from real 2024 outcomes more than the market's own real-time ADP does (ADP prices in current-year depth-chart/coaching information a backward-looking statistical fit cannot see). **This needs follow-up investigation before Stage 4** — do not treat the engine as validated. Report full detail in the Task 6 report (ask the coordinator for it if not preserved elsewhere).
 2. **Task 7 — the structure study has not been run.** 0RB vs Hero RB vs 2RB:1WR from slot 8, with error bars. Structures currently differentiate only modestly in position counts (0RB ends RB3/WR8, 2RB ends RB4/WR7) but differ substantially in player quality, which is what the comparison measures. Given RB≈WR over replacement, **be suspicious of any large structural edge** and investigate before believing it.
 
 **Known defects and unresolved questions:**

@@ -566,9 +566,16 @@ def sample_availability_batch(
 # Public lookup
 
 
-def availability_by_position(force_refit: bool = False) -> dict[str, PlayerAvailability]:
-    """Every position's fitted `PlayerAvailability`, keyed by position."""
-    table = load_or_fit_availability_rates(force_refit=force_refit)
+def hydrate_availability_table(table: pl.DataFrame) -> dict[str, PlayerAvailability]:
+    """Turn `fit_availability_rates`'s raw parameter table into hydrated
+    `PlayerAvailability` objects keyed by position -- factored out of
+    `availability_by_position` so a caller that deliberately bypasses the
+    disk cache (e.g. Stage 3's Task 6 backtest, which fits availability
+    from schedules/rosters/`weekly_stats`/`adp_history` restricted to
+    seasons through 2023 to avoid leaking the held-out 2024 season, and
+    must not overwrite the live cache -- there is only one, unnamespaced
+    `"availability_rates"` cache slot) can reuse this exact hydration
+    instead of duplicating it."""
     return {
         row["position"]: PlayerAvailability(
             position=row["position"],
@@ -578,3 +585,9 @@ def availability_by_position(force_refit: bool = False) -> dict[str, PlayerAvail
         )
         for row in table.to_dicts()
     }
+
+
+def availability_by_position(force_refit: bool = False) -> dict[str, PlayerAvailability]:
+    """Every position's fitted `PlayerAvailability`, keyed by position."""
+    table = load_or_fit_availability_rates(force_refit=force_refit)
+    return hydrate_availability_table(table)

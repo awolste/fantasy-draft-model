@@ -161,6 +161,8 @@ def build_player_pool(
     adp_history: pl.DataFrame | None = None,
     crosswalk: pl.DataFrame | None = None,
     force_refit: bool = False,
+    tier_shape_lookup: dict[tuple[str, int], TierShape] | None = None,
+    rank_curve_lookup: dict | None = None,
 ) -> dict[str, PlayerDistribution]:
     """Build the draftable 2026 player pool.
 
@@ -177,6 +179,21 @@ def build_player_pool(
     called with no arguments in normal use; the parameters exist so tests
     (and any future backtest against a different season) can inject
     synthetic or historical data instead.
+
+    `tier_shape_lookup`/`rank_curve_lookup`, if given, are used directly
+    instead of calling `load_or_fit_tier_shapes`/`load_or_fit_rank_curves`
+    (which cache to disk under a name that is *not* namespaced by season
+    coverage the way `load_or_fit_rank_curves`'s `rankings`-keyed cache
+    slot is -- see `store.cache_namespace`'s docstring). Stage 3's Task 6
+    backtest needs a fit restricted to seasons through 2023 (excluding the
+    held-out 2024 season entirely, to avoid leakage) without either
+    colliding with or silently overwriting the live, full-history cache
+    used everywhere else in this project -- these two parameters let it
+    fit that holdout lookup once (via the same `fit_tier_shapes`/
+    `fit_rank_curves` + hydration functions the cached path itself uses)
+    and pass it straight in, bypassing the disk cache for this call
+    entirely. `force_refit` is ignored for whichever of the two is
+    supplied this way.
     """
     if rankings is None:
         rankings = read("rankings_2026")
@@ -187,10 +204,12 @@ def build_player_pool(
     if crosswalk is None:
         crosswalk = load_crosswalk()
 
-    tier_shape_lookup = load_or_fit_tier_shapes(weekly, force_refit=force_refit)
-    rank_curve_lookup = load_or_fit_rank_curves(
-        adp_history, weekly, rankings=rankings, force_refit=force_refit
-    )
+    if tier_shape_lookup is None:
+        tier_shape_lookup = load_or_fit_tier_shapes(weekly, force_refit=force_refit)
+    if rank_curve_lookup is None:
+        rank_curve_lookup = load_or_fit_rank_curves(
+            adp_history, weekly, rankings=rankings, force_refit=force_refit
+        )
 
     ranked = rankings.with_columns(
         pl.col("rank").rank(method="ordinal").over("position").alias("position_rank")

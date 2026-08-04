@@ -248,7 +248,7 @@ per available player.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 import numpy as np
 import polars as pl
@@ -665,6 +665,17 @@ def _choose_our_pick(
 # The rollout itself
 
 
+PickPolicy = Callable[
+    [Sequence[str], Mapping[str, PlayerDistribution], Sequence[tuple[str, str]],
+     Mapping[str, float], Mapping[str, WeeklyDistribution]],
+    tuple[str, str],
+]
+"""A callable with the same signature as `_choose_our_pick` (positionally:
+available_ids, pool, roster_pairs, replacement_means,
+replacement_by_position) -> (player_id, position). See `run_rollout`'s
+`pick_policy` parameter."""
+
+
 def run_rollout(
     state: DraftState,
     pool: Mapping[str, PlayerDistribution],
@@ -676,6 +687,7 @@ def run_rollout(
     roster_decay: float = DEFAULT_ROSTER_DECAY,
     adp_table: pl.DataFrame | None = None,
     rankings: pl.DataFrame | None = None,
+    pick_policy: PickPolicy | None = None,
 ) -> DraftState:
     """Play `state` forward, pick by pick, until every roster is full.
 
@@ -704,6 +716,19 @@ def run_rollout(
     Raises `ValueError` (via `sample_pick`/`value_available`) if the pool
     runs out of players before every roster is full -- a real configuration
     error (pool too small for `n_teams * rounds`), not a case to paper over.
+
+    `pick_policy`, if given, replaces `_choose_our_pick` (this module's own
+    greedy `draft.value` policy) for `our_team`'s picks only -- opponents
+    are always sampled from `model` regardless. Signature: `(available_ids,
+    pool, roster_pairs, replacement_means, replacement_by_position) ->
+    (player_id, position)`, matching `_choose_our_pick`'s own positional
+    arguments (minus `n_teams`, which a caller closing over a fixed
+    `state.n_teams` normally does not need). This is what lets Stage 3's
+    Task 6 backtest run the *same* opponent draws against four different
+    "who occupies our slot" policies -- our own greedy engine, best-
+    available-by-ADP, best-available-by-consensus-rank, and random-but-
+    legal -- for a paired comparison, without duplicating this whole
+    pick-by-pick loop four times.
     """
     replacement_means = {pos: float(dist.mean) for pos, dist in replacement_by_position.items()}
 
@@ -736,10 +761,15 @@ def run_rollout(
         team = team_for_pick(next_overall, state.n_teams)
 
         if team == our_team:
-            player_id, position = _choose_our_pick(
-                available_ids, pool, rosters[team], replacement_means, replacement_by_position,
-                n_teams=state.n_teams,
-            )
+            if pick_policy is not None:
+                player_id, position = pick_policy(
+                    available_ids, pool, rosters[team], replacement_means, replacement_by_position
+                )
+            else:
+                player_id, position = _choose_our_pick(
+                    available_ids, pool, rosters[team], replacement_means, replacement_by_position,
+                    n_teams=state.n_teams,
+                )
         else:
             candidates = [
                 AvailablePlayer(player_id=pid, position=pool[pid].position, adp=adp_lookup[pid])

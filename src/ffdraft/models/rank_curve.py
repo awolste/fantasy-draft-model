@@ -222,6 +222,33 @@ def fit_rank_curves(
     return pl.DataFrame(adp_rows), pl.DataFrame(deep_rows)
 
 
+def hydrate_rank_curves(adp_table: pl.DataFrame, deep_table: pl.DataFrame) -> dict[str, RankCurve]:
+    """Turn `fit_rank_curves`'s two raw parameter tables into hydrated
+    `RankCurve` objects keyed by position -- the same assembly
+    `load_or_fit_rank_curves` does after a cache hit or a fresh fit,
+    factored out so a caller that deliberately bypasses the cache (e.g.
+    Stage 3's Task 6 backtest, which fits a leakage-safe rank curve from
+    data restricted to seasons through 2023 and must not write that fit
+    into the live, unnamespaced-by-season cache slot) can still reuse this
+    exact assembly logic instead of duplicating it."""
+    curves = {}
+    for row in adp_table.to_dicts():
+        position = row["position"]
+        knots = deep_table.filter(pl.col("position") == position).sort("knot_rank")
+        curves[position] = RankCurve(
+            position=position,
+            a=row["a"],
+            b=row["b"],
+            c=row["c"],
+            n_players=row["n_players"],
+            boundary_rank=row["boundary_rank"],
+            deep_knot_ranks=tuple(knots["knot_rank"].to_list()),
+            deep_knot_ppg=tuple(knots["knot_ppg"].to_list()),
+            max_supported_rank=row["max_supported_rank"],
+        )
+    return curves
+
+
 def load_or_fit_rank_curves(
     adp_history: pl.DataFrame,
     weekly: pl.DataFrame,
@@ -267,22 +294,4 @@ def load_or_fit_rank_curves(
         write(deep_name, deep_table)
         write_fingerprint(cache_name, fp)
 
-    curves = {}
-    for row in adp_table.to_dicts():
-        position = row["position"]
-        knots = (
-            deep_table.filter(pl.col("position") == position)
-            .sort("knot_rank")
-        )
-        curves[position] = RankCurve(
-            position=position,
-            a=row["a"],
-            b=row["b"],
-            c=row["c"],
-            n_players=row["n_players"],
-            boundary_rank=row["boundary_rank"],
-            deep_knot_ranks=tuple(knots["knot_rank"].to_list()),
-            deep_knot_ppg=tuple(knots["knot_ppg"].to_list()),
-            max_supported_rank=row["max_supported_rank"],
-        )
-    return curves
+    return hydrate_rank_curves(adp_table, deep_table)
