@@ -60,3 +60,41 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def with_alternate_replacement() -> None:
+    """Re-rank the same pool using 2024's REALIZED replacement levels
+    (measured by scripts/validate_replacement_2024.py, top_k=5) instead of
+    the through-2023 fit. This is leakage -- deliberately so. It answers a
+    diagnostic question, not a predictive one: is the engine's QB-heavy
+    positional tilt explained by 2024's replacement levels differing from
+    their long-run means?"""
+    ctx = fit_holdout_context()
+    realized_2024 = {"QB": 20.11, "RB": 8.83, "WR": 8.88, "TE": 7.67, "K": 7.22, "DST": 7.50}
+
+    def shares(means, n):
+        rows = sorted(
+            (
+                (float(p.distribution.mean) - means[p.position], p.position)
+                for p in ctx.pool.values()
+            ),
+            reverse=True,
+        )[:n]
+        c: dict[str, int] = {}
+        for _, pos in rows:
+            c[pos] = c.get(pos, 0) + 1
+        return dict(sorted(c.items()))
+
+    by_adp = sorted(ctx.pool.items(), key=lambda kv: ctx.adp_by_player_id.get(kv[0], 1e9))
+
+    def adp_shares(n):
+        c: dict[str, int] = {}
+        for _, p in by_adp[:n]:
+            c[p.position] = c.get(p.position, 0) + 1
+        return dict(sorted(c.items()))
+
+    for n in (40, 100):
+        print(f"\ntop {n} position shares")
+        print(f"  VOR, fitted <=2023 repl : {shares(ctx.replacement_means, n)}")
+        print(f"  VOR, realized 2024 repl : {shares(realized_2024, n)}")
+        print(f"  ADP                     : {adp_shares(n)}")

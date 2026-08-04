@@ -306,7 +306,55 @@ What is now known about it, and constrains any future hypothesis:
 - Both the engine and `vor_only` lose to ADP, and both differ from ADP in the same direction: **more QB/TE, fewer RB/WR**. ADP's top-40 is RB 17 / WR 18 / QB 3 / TE 2; our VOR top-40 is RB 12 / WR 16 / QB 8 / TE 4. That positional tilt is the one thing every losing policy shares and ADP does not.
 - The tilt comes from the replacement means: **QB replacement is 17.96 with QB30 at 18.01** — the QB curve is nearly flat past the top few, so elite-QB VOR (Josh Allen +9.58) prices him near the top of the board. If QB replacement is too *low* — e.g. if what you can actually stream weekly is better than 17.96 — every QB is overpriced and the tilt follows mechanically.
 
-**The next check, and the one the evidence now points at:** validate the replacement means as an order statistic against real 2024 waiver-wire availability, QB first. A single miscalibrated replacement level would explain the shared positional tilt across every losing policy, which no policy-level fix has touched.
+### Test 7 — replacement levels are NOT miscalibrated. The tilt is one season's variance.
+
+`scripts/validate_replacement_2024.py` and `validate_replacement_trend.py`. The same estimator (`weekly_replacement_values`) run on 2024 alone — out of sample for a through-2023 fit.
+
+```
+pos   fitted <=2023   realized 2024     diff
+QB           17.96           20.11    +2.15
+RB            9.88            8.83    -1.05
+WR           10.05            8.88    -1.19
+TE            8.20            7.67    -0.53
+K             7.97            7.22    -0.75
+```
+
+The QB miss is in the predicted direction and the RB/WR misses compound it: QB replacement too low **and** RB/WR replacement too high both overprice quarterbacks, ~3.3 ppg on the QB-vs-WR comparison.
+
+**But it is not a calibration bug.** The full per-season series (this league's scoring):
+
+```
+       2018   2019   2020   2021   2022   2023   2024   2025
+QB    18.57  18.34  19.31  16.83  16.36  18.37  20.11  18.20
+RB    12.69   7.52  11.91  10.09   7.70   9.36   8.83   8.26
+WR    10.40  11.08  10.03   8.85   8.86  11.06   8.88   9.55
+```
+
+The QB series is **stationary and noisy, not trending**: 8-season mean 18.26, sd 1.21, and 2025 comes back to 18.20 — essentially the fitted 17.96. **2024 is the high outlier of the series.** The fitted value is a good estimate of the long-run mean. The hypothesis is dead.
+
+*(A ratio worth not over-reading: sd/spread across P10–P30 is QB 0.49, RB 0.57, WR 0.31, TE 0.52. RB is the noisiest by that measure, so "QB is uniquely unidentifiable" is **not** supported.)*
+
+**What this does explain, completely, is the positional tilt.** Re-ranking the same pool with 2024's realized replacement instead of the fit (deliberately leaky — diagnostic only, see `diagnose_vor_scale.with_alternate_replacement`):
+
+```
+top 40   VOR, fitted <=2023 : QB 8  RB 12  TE 4  WR 16
+         VOR, realized 2024 : QB 3  RB 13  TE 4  WR 20
+         ADP                : QB 3  RB 17  TE 2  WR 18
+```
+
+QB share goes **8 → 3, exactly matching ADP.** The one feature every losing policy shared, and ADP did not, is entirely an artifact of 2024's replacement levels differing from their long-run means.
+
+### What this means for the gate — read carefully
+
+**It does not exonerate the engine.** Ex ante the engine still scores **2.75% against a 10% baseline**. Nothing here explains being that far *below* average, and the QB tilt alone should not do that.
+
+**It does invalidate the gate as currently designed.** The 2024 backtest is a single sample, and — for a strategy whose designed edge is a QB premium (§6, the 6-point-passing-TD inefficiency) — it is the **most hostile of the eight seasons on record**. A one-season backtest cannot distinguish "the QB thesis is wrong" from "2024 was the worst year in eight for it." Both predict exactly what was observed.
+
+**The next thing to do, and it is now well-specified:** run the backtest across **multiple holdout seasons**, not just 2024. FFC ADP covers 2018–2024, so 2019–2023 are all available as additional holdouts at the cost of refitting per season. Two things fall out:
+- If the engine loses in every season, the approach is wrong and the QB story was a red herring.
+- If it loses badly in 2024 and is competitive in seasons where QB replacement ran near its mean, the gate was measuring season variance and needs to be re-specified as a multi-season average.
+
+Do this **before** any further work on `value.py` or the policy layer. Four separate policy-level fixes have now been measured and the largest bought 1.33pp; the evidence says the remaining problem is not in that layer.
 
 ### Also important: the backtest never tested the recommender
 
