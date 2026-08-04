@@ -40,7 +40,7 @@ Full K and DST scoring rules are in the spec. Two bands are **neutral, not missi
 
 Stage 3 remaining: **Task 7 (the structure study — the headline deliverable)**. Task 6 (the backtest) is done, and it failed the gate: the engine loses to naive ADP-following on real 2024 results by 13.5pp ± 1.65pp — see item 1 below. **Task 7 should not proceed on the assumption the engine works** until this is investigated.
 
-**That conclusion has since been overturned — see §7b tests 6-8.** Two things were wrong with it. (a) ~6pp of the deficit is an artifact of the scoring rule: `real_season_champion` sets lineups with perfect hindsight, which pays FLEX depth a premium no real manager could collect. (b) 2024 is the worst of the five usable holdout seasons for this engine. Re-run across 2020–2024 with ex-ante scoring, **the engine beats ADP in three of five seasons and averages +2.20pp against a between-season SE of 4.06pp** — not broken, but not demonstrated either.
+**That conclusion has since been overturned — see §7b tests 6-8.** Two things were wrong with it. (a) ~6pp of the deficit is an artifact of the scoring rule: `real_season_champion` sets lineups with perfect hindsight, which pays FLEX depth a premium no real manager could collect. (b) 2024 is the worst of the five usable holdout seasons for this engine. Re-run across 2020–2024 through the fixed production path, **the engine beats ADP in three of five seasons and averages +2.45pp against a between-season SE of 4.27pp** — not broken, but not demonstrated either.
 
 **Quote ex-ante, multi-season numbers. Do not quote the single-season 2024 figure**, and do not repeat "the engine loses to ADP by 13.5pp" — that number is now known to be mostly artifact.
 
@@ -389,14 +389,41 @@ The mechanism is concrete: `value.py` consumes replacement level as a **point es
 
 **2019 is unusable as a holdout** and this is correct behavior, not a bug: fitting through 2018 alone leaves only 17 matched (ADP, performance) TE pairs, and `fit_rank_curves` raises rather than fitting a curve on that. The usable holdout range is **2020–2024**.
 
+### Test 9 — the gate, re-run through the fixed production path
+
+The ex-ante lineup fix is now **landed in `real_season_champion` itself** (not just in a diagnostic), so `run_backtest` is the trustworthy scorer. `scripts/backtest_multiseason.py` drives it directly. N=400 per season:
+
+| holdout | engine | adp | consensus | random | engine − adp |
+|---|---|---|---|---|---|
+| 2020 | 12.00% | 7.00% | 7.00% | 0.00% | **+5.00pp** |
+| 2021 | 18.75% | 9.75% | 9.75% | 0.00% | **+9.00pp** |
+| 2022 | 21.50% | 8.50% | 8.50% | 0.00% | **+13.00pp** |
+| 2023 | 4.00% | 9.00% | 9.00% | 0.00% | −5.00pp |
+| 2024 | 2.50% | 12.25% | 12.25% | 0.00% | −9.75pp |
+
+**Pooled: +2.45pp, between-season SE 4.27pp. Engine beats ADP in 3 of 5 seasons.**
+
+This replicates the standalone diagnostic (+2.20pp ± 4.06pp) through completely separate scoring code, which is the cross-check that the fix landed correctly rather than merely changing the number.
+
 ### Revised status of the gate
 
 The Stage 3 Task 6 gate, as specified ("beat ADP on held-out 2024"), **failed for reasons that were mostly not the engine's fault**: ~6pp of scoring-rule artifact plus a season whose QB replacement sat at the top of its eight-year range. Re-specified as a multi-season ex-ante average, the engine is at +2.20pp ± 4.06pp — **passing in sign, not in significance.**
 
 Recommended next steps, in order:
-1. Fix `real_season_champion` to set lineups ex ante. It is wrong as written and it biases every comparison between differently-shaped rosters.
-2. Propagate replacement-level uncertainty into `value.py` (see mechanism above). Re-run the sweep; success looks like *less* season-to-season swing, not a bigger mean.
-3. Only then re-run Task 7 (the structure study). Note that its answer will now be *conditional on how the QB tilt is sized*, which is a more honest framing than the original question assumed.
+1. ~~Fix `real_season_champion` to set lineups ex ante.~~ **DONE** — see test 9 and commit `2b845cc`.
+2. Task 7, the structure study. Unblocked and built (`scripts/structure_study.py`).
+3. Replacement-level uncertainty — **but the original rationale for it was wrong, see below.**
+
+#### Correction: "propagate replacement uncertainty to shrink the QB tilt" is not sound as stated
+
+An earlier version of this document recommended propagating replacement-level uncertainty into `value.py` on the grounds that it would shrink the QB tilt toward the market. **Working through `value.py`, it does the opposite or nothing:**
+
+- For a clear starter, `lineup_marginal ≈ mean − R` is **linear** in R, so `E_R[value] = value(E[R])` exactly. Averaging over uncertainty changes nothing.
+- For a marginal player, `_bench_value` is floored at zero (`if over_replacement <= 0: return 0.0`), making it **convex** in R. By Jensen, `E_R[value] > value(E[R])` — the value goes *up*.
+
+Mid-tier QBs sit precisely in that marginal zone (QB10 at 20.47 against R ≈ 18.26 ± 1.21), so the proposed change would if anything **increase** the QB tilt. And §6 already records that variance has *positive* value in this league (60% playoff rate, 3-round bracket), so there is no general argument that hedging helps here either.
+
+The experiment is still worth running — as a **hierarchical bootstrap** (draw a season-level replacement offset per simulated season from the between-season distribution, sample weeks around it) — but it should be run **with no predicted direction** and judged on measured season-to-season swing. Do not repeat the "it will shrink the tilt" claim; it was an assertion, not a derivation.
 
 ### Also important: the backtest never tested the recommender
 
