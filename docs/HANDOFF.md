@@ -40,6 +40,8 @@ Full K and DST scoring rules are in the spec. Two bands are **neutral, not missi
 
 Stage 3 remaining: **Task 7 (the structure study — the headline deliverable)**. Task 6 (the backtest) is done, and it failed the gate: the engine loses to naive ADP-following on real 2024 results by 13.5pp ± 1.65pp — see item 1 below. **Task 7 should not proceed on the assumption the engine works** until this is investigated.
 
+Diagnosis as of 2026-08-04 (§7b, tests 1-6): **~6pp of that deficit is an artifact of the scoring rule** (hindsight lineup-setting pays FLEX depth a premium no manager could collect). The corrected, ex-ante deficit is **9.25pp ± 1.76pp** — smaller, but still a failed gate: the engine scores 2.75% against a 10% baseline. Cause not yet identified; current evidence points at the replacement means rather than at any policy or value-function layer.
+
 ## 4. Architecture
 
 ```
@@ -88,7 +90,7 @@ These were deliberate. Do not silently reverse them.
 
 **ADP comes from Fantasy Football Calculator, not FantasyPros.** FantasyPros fences ADP behind registration (5 rows logged out). Its ECR rankings are still used and work fine. FFC's `teams` parameter does **not** filter — `teams=10` and `teams=12` return identical data, so no 10-team-specific ADP exists anywhere.
 
-**Lineups are set from realized scores** (perfect hindsight no manager has). Quantified: max 2.5pp swing on real 2024 rosters. Modest, but those rosters were not variance-stacked, so it does not bound the effect on boom/bust builds.
+**Lineups are set from realized scores** (perfect hindsight no manager has). Originally quantified at max 2.5pp swing on real 2024 rosters, with a caveat that those rosters were not variance-stacked. **That caveat proved to be the important part — see §7b Test 6.** For a *depth*-stacked roster (15 FLEX-eligible players, which is what ADP-following produces), hindsight is worth **5.75pp**, and it is worth nothing to a roster that spends picks on single-slot positions. The 2.5pp figure does not bound this, and `real_season_champion` should be treated as **defective for comparing rosters of different shapes**.
 
 ## 6. Key measured findings
 
