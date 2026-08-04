@@ -109,7 +109,9 @@ These were deliberate. Do not silently reverse them.
 **Blocking the headline deliverable:**
 
 1. **Task 6 — the backtest has been run, and the engine loses.** `scripts/backtest.py` / `src/ffdraft/backtest.py`. Full leakage audit passed (every fitted component checked against seasons through 2023 only; see `tests/test_backtest.py::test_fit_report_seasons_never_include_the_holdout_season`). N=600 draft realizations, same-seed paired comparison: **engine 3.00% ± 0.70% SE vs. ADP-baseline 16.50% ± 1.52% SE — engine minus ADP = −13.50pp ± 1.65pp SE**, an ~8-sigma deficit, not noise. Random-legal scored 0.00%, so the engine barely clears a policy with no skill at all. The gap concentrates in rounds 3–6 (mean real-2024 points-per-game of our picks there trails ADP's picks at the same slot by 2-3 ppg; picks 1-2 are roughly at parity or slightly ahead). **Do not treat the engine as validated.** Diagnosis is under way — see §7b below for what has already been ruled out.
-2. **Task 7 — the structure study has not been run.** 0RB vs Hero RB vs 2RB:1WR from slot 8, with error bars. Structures currently differentiate only modestly in position counts (0RB ends RB3/WR8, 2RB ends RB4/WR7) but differ substantially in player quality, which is what the comparison measures. Given RB≈WR over replacement, **be suspicious of any large structural edge** and investigate before believing it.
+1b. **The next diagnostic step is specified and not yet run:** put the ADP policy through the engine's own code path and confirm it still scores ~16%. See the end of §7b. This is cheap and decisive about whether the harness or the engine is at fault, and everything else downstream depends on the answer.
+
+2. **Task 7 — the structure study has not been run**, and **should not run until item 1 is resolved.** It would play out each structure using a policy known to lose to ADP by 14pp, so any answer would be an artifact of a broken drafter rather than a fact about roster construction. 0RB vs Hero RB vs 2RB:1WR from slot 8, with error bars. Structures currently differentiate only modestly in position counts (0RB ends RB3/WR8, 2RB ends RB4/WR7) but differ substantially in player quality, which is what the comparison measures. Given RB≈WR over replacement, **be suspicious of any large structural edge** and investigate before believing it.
 
 **Known defects and unresolved questions:**
 
@@ -147,25 +149,48 @@ Spearman correlation against **actual 2024 points per game**, using `fit_holdout
 
 A corollary worth knowing: because there is no within-position disagreement between us and ADP, **every disagreement is cross-positional**. Any analysis looking for "players we overrate" within a position will find nothing.
 
-### Test 2 — the ladder (in progress at time of writing)
+### Test 2 — the ladder (complete). Ruled out hypotheses A and C.
 
-Six contenders, N=600, common random numbers, same opponent seeds:
+Six contenders, N=600 realizations, common random numbers, same opponent seeds. Runtime 740s (1.23s/realization).
 
-`engine`, `adp`, `consensus`, `random`, `proj_mean` (draft by our projected mean directly, no VOR, no roster-awareness), `engine_capped` (QB≤2, K≤1).
+| Contender | Championship rate |
+|---|---|
+| `adp` | **16.17% ± 1.50%** |
+| `consensus` | 16.17% ± 1.50% (identical — same underlying signal, no independent 2024 consensus source exists in this project) |
+| `engine_capped` (QB≤2, K≤1) | 2.83% ± 0.68% |
+| `engine` | 2.17% ± 0.59% |
+| `proj_mean` (raw projected points, no VOR) | **0.00% ± 0.00%** |
+| `random` | 0.00% ± 0.00% |
 
-The two comparisons that carry the diagnosis:
+Paired adjacent differences:
 
-- **`proj_mean` vs `adp`** — expected to be close, given Test 1. If it is not, something is wrong in how the pool orders players *across* positions.
-- **`proj_mean` vs `engine`** — **the critical rung.** If `proj_mean` lands near 16.5% while `engine` sits at 3%, then VOR and roster-awareness are destroying ~13pp on their own.
-- **`engine` vs `engine_capped`** — apportions how much is hypothesis A.
+```
+proj_mean - adp        : -16.17pp  (SE 1.50)
+engine - proj_mean     :  +2.17pp  (SE 0.59)
+engine_capped - engine :  +0.67pp  (SE 0.75)   <- not significant
+```
 
-If `engine_capped` closes only a small part of the gap, the problem is the framing rather than the guard.
+**Hypothesis A (wasted roster spots) is small.** Capping QB and K buys +0.67pp against an SE of 0.75 — indistinguishable from zero. The three wasted spots were real but cost almost nothing.
 
-### The hypothesis worth stating plainly
+**Hypothesis C (VOR is harmful) is refuted, and in the direction opposite to what was predicted.** VOR and roster-awareness *help*: the engine beats raw-projection drafting by +2.17pp. The coordinator argued in advance that VOR was noise layered on a correct signal. That was wrong.
 
-**Value-over-replacement may simply be mis-specified for this league.** VOR exists to price positional scarcity. But this league has two FLEX slots, weekly lineup optimization, and an ordinary waiver wire — and Stage 2 measured RB and WR starters as worth nearly identical amounts over replacement (6.4 vs 6.5 points/week). If positions are that interchangeable, scarcity has little left to price, and VOR's adjustments become noise layered on a signal that was already correct.
+### Important caveat: `proj_mean` was a badly chosen rung
 
-This project assumed VOR was correct throughout: `value.py`, the candidate pruning, and the rollout policy all rest on it. It has never been validated against a simpler best-available-by-projection policy. The `proj_mean` rung is that validation.
+`proj_mean` scoring **exactly 0.00%** — 0 wins in 600, identical to random — is almost certainly degenerate rather than merely weak. Ranking by raw projected *points* ignores position entirely, and QBs carry the highest absolute means in this league (Josh Allen 27.45 vs Bijan Robinson 24.39), so it very likely drafts quarterback after quarterback. That is precisely the failure VOR exists to prevent, which is why VOR looks good by comparison.
+
+So the honest reading of the ladder is **not** "VOR helps." It is: **VOR rescues a degenerate baseline and still lands 14pp short of ADP.**
+
+The rung that would actually have been informative — and does not yet exist — is our projections converted to VOR but *without* the roster-awareness and bench-depth machinery. That would separate "scarcity correction" from "roster construction." Whoever picks this up should build that rung before drawing further conclusions.
+
+### Where the diagnosis stands
+
+Eliminated: stale projections (Test 1), wasted roster spots (rung 4), VOR-as-harmful (rung 3).
+
+**The gap is essentially undiminished and unexplained.** The engine carries the market's information faithfully (Test 1), applies a scarcity correction that helps (+2.17pp), and still loses to reading ADP off a page by 14pp.
+
+**Next check to run, and the cheapest decisive one:** run the ADP policy *through the engine's own code path* — same rollout, same roster construction, same scoring — and confirm it still scores ~16%. If it drops, the harness is disadvantaging our slot rather than the engine's picks being bad, and the leakage audit would not have caught that. If it holds at 16%, the engine's picks genuinely are that much worse and the approach itself is the problem.
+
+Until that check is done, **do not conclude the approach is unsalvageable, and equally do not conclude the harness is at fault.** Both remain live.
 
 ### Minor issue noticed in passing
 
