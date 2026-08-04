@@ -40,56 +40,111 @@ the top 15 by greedy value -- see that test for the actual comparison.
 ## Measured variance decomposition -- the basis for (n_rollouts,
 ## n_sims_per_rollout)
 
-Measured directly (see `docs/superpowers/plans/2026-08-03-opponent-model-
-and-optimizer.md`'s Task 5 section and this module's task report for the
-full numbers): forcing one strong candidate as our pick 1, then running
-R=30 independent rollouts each finished off with S=5,000 season
-simulations, gives 30 independent estimates of that roster's championship
-probability. Their **sample variance is 0.000419** (SD ~2.05pp). The
-**within-rollout (season-simulation) variance** at S=5,000,
-`mean(p*(1-p))/S`, is only **1.86e-05** (SD ~0.43pp, matching the plan
-doc's documented "~0.42pp at 5,000 sims" figure almost exactly). Subtracting
-gives the **between-rollout ("draft uncertainty") variance at ~0.00040**
-(SD ~2.00pp) -- roughly **21.5x the within-rollout variance**. This
-confirms the plan doc's suspicion directly: which players we actually end
-up with, not which season plays out, is overwhelmingly the dominant source
-of noise in a title-equity estimate. More rollouts, not more season sims
-per rollout, is where the budget belongs.
+**This decomposition was re-measured on 2026-08-03 and superseded the
+original figures below it, which were measured before a policy fix
+(`draft.rollout`'s bench floor/ceiling guard -- see that module's
+docstring, "Greedy value alone is not enough: the RB2/QB5 incident") and
+were stale, not wrong: the pre-fix greedy policy converged to a
+near-deterministic roster shape (~5 QBs, exactly 2 RBs, every seed), so
+between-rollout ("draft uncertainty") variance was genuinely small under
+that policy. Post-fix, position *counts* are stabilized by the guard but
+*which players* end up on the roster varies far more with how the draft
+falls -- real draft uncertainty the pre-fix measurement could not see
+because the pre-fix policy suppressed it.**
+
+Confirmed directly, not just inferred: re-running the *original*
+methodology unchanged (R=30 independent rollouts, S=5,000 season sims
+each, one strong candidate forced as our pick 8) against the *current*
+policy reproduces **3.77pp**, not the old 2.00pp -- proof the old figure
+was a property of the old policy, not a flaw in how it was measured. A
+tighter re-measurement (below) confirms the same order of magnitude, so
+the recorded constants are updated rather than the methodology.
+
+**Re-measurement (n=50 rollouts, not 30):** the SD of a sample SD
+estimate is `~SD/sqrt(2*(n-1))` -- n=10 (as an independent, coordinator-run
+check separately found: mean 20.3%, SD 5.97pp on a different pick/
+candidate) carries `+-1.4pp` of noise on a ~6pp figure, too wide to size a
+budget on. n=30 tightens that to `+-0.50pp`; n=50 (used here) to `+-0.36pp`
+-- tight enough, at a wall-clock cost of ~53s for the whole re-measurement,
+that a larger n was not worth the marginal precision.
+
+Forcing the top-greedy-value candidate as our pick 8 (from an empty draft,
+opponents seeded through pick 7 by one real rollout -- see
+`tests/test_recommender.py::test_real_recommendation_at_pick_8_from_empty_
+draft`), then running 50 independent rollouts each finished off with
+S=5,000 season simulations, gives 50 independent estimates of that
+roster's championship probability. Their **sample variance is 0.001260**
+(SD ~3.55pp). The **within-rollout (season-simulation) variance** at
+S=5,000, `mean(p*(1-p))/S`, is **3.6e-05** (SD ~0.60pp -- close to, but
+noticeably above, the pre-fix figure of ~0.43pp, because the guard's
+narrower per-pick candidate sets shift the average championship
+probability, and therefore `p*(1-p)`, somewhat). Subtracting gives the
+**between-rollout ("draft uncertainty") variance at 0.001223** (SD
+~3.50pp) -- roughly **34x the within-rollout variance**, and the dominant
+term more emphatically than before. `MEASURED_BETWEEN_ROLLOUT_SD_PP` and
+`MEASURED_WITHIN_ROLLOUT_SD_AT_5000_PP` below record these; see
+`measure_variance_decomposition` and
+`tests/test_recommender.py::test_variance_decomposition_has_not_drifted`
+for the cheap CI guard that re-checks these have not drifted again.
+
+**A caveat, reported honestly rather than smoothed over:** the
+coordinator's independent 10-seed check (different pick/candidate) found
+5.97pp, noticeably higher than this module's 3.50-3.77pp on pick 8. Both
+are far closer to each other than either is to the old 2.00pp, and both
+point the same direction (draft uncertainty is now the dominant, not
+secondary, source of noise), but the gap between them suggests
+between-rollout variance may itself be state/candidate-dependent -- a
+question this task did not have budget to fully resolve. The allocation
+below uses this module's own pick-8 figure (the state it will actually be
+used on) rather than the coordinator's, which is the more defensible
+choice for *this* recommendation but may understate variance at picks
+where the true figure runs closer to 6pp. The staleness guard (below) is
+the cheap, ongoing check that would catch such a state-dependent drift in
+practice.
 
 **Deriving the allocation.** This is a standard two-stage (cluster)
 sampling problem: `n_rollouts` independent "clusters" (draft outcomes),
 each sub-sampled with `n_sims_per_rollout` "elements" (season outcomes).
-Measured per-unit costs: one rollout costs `a ~= 0.248s` regardless of how
-many season sims follow it; one season simulation costs `b ~= 1.525e-4s`
-(from 5,000 sims taking 0.76-0.83s). For a fixed total compute budget, the
-season-sim count that minimizes the resulting variance is the Neyman-style
-optimum
+Measured per-unit costs (re-measured alongside the decomposition above,
+essentially unchanged from before the policy fix): one rollout costs
+`a ~= 0.267s` regardless of how many season sims follow it (up slightly
+from the pre-fix `~0.248s` -- the bench floor/ceiling guard does a little
+extra bookkeeping per pick); one season simulation costs `b ~= 1.554e-4s`
+(from 5,000 sims taking ~0.777s), matching the pre-fix `~1.525e-4s` almost
+exactly -- season simulation itself was untouched by the policy fix, as
+expected. For a fixed total compute budget, the season-sim count that
+minimizes the resulting variance is the Neyman-style optimum
 
     M* = sqrt(a * w / (b * sigma_draft^2))
 
-where `w = mean(p*(1-p)) ~= 0.093` (the average binomial variance factor
-across rollouts) and `sigma_draft^2 ~= 0.00040` (measured above). Plugging
-in the measured constants gives `M* ~= 615`. **`n_sims_per_rollout`
-defaults to 600** -- deliberately not the round number 500 or 1,000; this
-value falls directly out of the measured costs and the measured
-decomposition, not a guess rounded afterward.
+where `w = mean(p*(1-p)) ~= 0.18` (the average binomial variance factor
+across rollouts -- up from the pre-fix `~0.093` because this measurement's
+mean championship probability, ~24%, sits further from 0/1) and
+`sigma_draft^2 ~= 0.001223` (measured above). Plugging in the measured
+constants gives `M* ~= 503` -- *smaller* than the pre-fix `M*~=615`,
+because a larger `sigma_draft^2` means *relatively* less is gained from
+polishing any one cluster's within-rollout estimate; the budget shifts
+even further toward more clusters (rollouts), fewer elements (season sims)
+per cluster. **`n_sims_per_rollout` defaults to 500.**
 
-Given `n_sims_per_rollout=600`, the per-rollout total variance is
-`sigma_draft^2 + w/600 ~= 0.00040 + 0.000155 = 0.000555` (SD ~2.36pp).
-Averaging over `n_rollouts` divides this by `n_rollouts`; to land near a
-~0.5pp standard error on the leader (fine enough to make genuine
-differences visible, coarse enough to stay honest about what a single pick
-can realistically move) requires `n_rollouts ~= 0.000555 / 0.005**2 ~= 22`.
-**`n_rollouts` defaults to 25** -- the smallest round-ish number clearing
-that requirement with a small margin, at a candidate cost of
-`25 * (0.248 + 600*1.525e-4) ~= 25 * 0.34s ~= 8.6s`, i.e. **~2 minutes for
-15 candidates**. This is slower than the naive "1 rollout x 5,000 sims"
-scheme the original plan-doc budget assumed (which would have delivered a
-misleadingly tight-looking ~0.42pp SE on a *single, arbitrary* draft
-outcome, understating the true uncertainty by ignoring draft variance
-entirely) -- the honest number is a couple of minutes, not twelve seconds,
-because draft uncertainty, not season-simulation noise, is what actually
-needs averaging down.
+Given `n_sims_per_rollout=500`, the per-rollout total variance is
+`sigma_draft^2 + w/500 ~= 0.001223 + 0.00036 = 0.001583` (SD ~3.98pp).
+Averaging over `n_rollouts` divides this by `n_rollouts`; to land near the
+same ~0.5pp standard-error target the original allocation used (fine
+enough to make genuine differences visible, coarse enough to stay honest
+about what a single pick can realistically move) requires
+`n_rollouts ~= 0.001583 / 0.005**2 ~= 63.3`. **`n_rollouts` defaults to
+65** -- the smallest round-ish number clearing that requirement with a
+small margin (resulting leader SE ~0.49pp), at a candidate cost of
+`65 * (0.267 + 500*1.554e-4) ~= 65 * 0.345s ~= 22.4s`, i.e. **~5.6 minutes
+for 15 candidates**. This is materially slower than the pre-fix budget's
+~2 minutes -- not because anything got less efficient, but because the
+honest between-rollout variance is ~1.75x what the pre-fix measurement
+(on a policy that had suppressed most of it) reported. Trimming rollouts
+back down to keep a "nice" ~2-minute number would silently reintroduce the
+same understated-error-bar problem this re-measurement exists to fix; the
+coordinator asked for wide, correct error bars over narrow, wrong ones,
+and this is what that costs.
 
 ## Common random numbers (CRN)
 
@@ -150,8 +205,18 @@ from .value import PlayerValue, value_available
 # measured variance decomposition and measured per-unit costs.
 
 DEFAULT_N_CANDIDATES: int = 15
-DEFAULT_N_ROLLOUTS: int = 25
-DEFAULT_N_SIMS_PER_ROLLOUT: int = 600
+DEFAULT_N_ROLLOUTS: int = 65
+DEFAULT_N_SIMS_PER_ROLLOUT: int = 500
+
+# The measured variance decomposition the allocation above is derived from
+# (see module docstring, "Measured variance decomposition") -- re-measured
+# 2026-08-03 at pick 8, n=50 rollouts, S=5,000 season sims per rollout. Kept
+# as named constants (rather than only living in the docstring's prose) so
+# `measure_variance_decomposition` and the CI staleness guard
+# (`tests/test_recommender.py::test_variance_decomposition_has_not_drifted`)
+# have something concrete to compare a fresh small-n measurement against.
+MEASURED_BETWEEN_ROLLOUT_SD_PP: float = 3.50
+MEASURED_WITHIN_ROLLOUT_SD_AT_5000_PP: float = 0.60
 
 # A candidate is flagged `indistinguishable_from_leader` when its paired
 # difference from the leader is smaller than this many standard errors of
@@ -286,6 +351,138 @@ def _roster_counts(roster_pairs: Sequence[tuple[str, str]]) -> dict[str, int]:
     return counts
 
 
+# ---------------------------------------------------------------------------
+# Variance decomposition -- both the tool used to derive DEFAULT_N_ROLLOUTS/
+# DEFAULT_N_SIMS_PER_ROLLOUT above, and (at small n_rollouts/n_sims_per_
+# rollout) the cheap CI staleness guard that re-checks those defaults have
+# not silently gone stale again the way the pre-fix measurement did -- see
+# module docstring, "Measured variance decomposition".
+
+
+@dataclass(frozen=True)
+class VarianceDecomposition:
+    """Total/within/between-rollout variance of one candidate's simulated
+    championship probability, plus the settings used to measure it.
+
+    `between_rollout_variance` is `total_variance - within_rollout_variance`
+    by subtraction -- it can come out slightly negative at small
+    `n_rollouts` (sampling noise on the within-rollout estimate), which is
+    reported as-is rather than clamped to zero: a caller sizing a budget or
+    a CI check comparing this against `MEASURED_BETWEEN_ROLLOUT_SD_PP`
+    should see that, not a silently-floored number."""
+
+    player_id: str
+    n_rollouts: int
+    n_sims_per_rollout: int
+    mean_championship_probability: float
+    total_variance: float
+    within_rollout_variance: float
+    between_rollout_variance: float
+
+    @property
+    def total_sd_pp(self) -> float:
+        return float(np.sqrt(self.total_variance) * 100.0)
+
+    @property
+    def within_rollout_sd_pp(self) -> float:
+        return float(np.sqrt(self.within_rollout_variance) * 100.0)
+
+    @property
+    def between_rollout_sd_pp(self) -> float:
+        return float(np.sqrt(max(self.between_rollout_variance, 0.0)) * 100.0)
+
+
+def measure_variance_decomposition(
+    state: DraftState,
+    pool: Mapping[str, PlayerDistribution],
+    model: OpponentModel,
+    replacement_by_position: Mapping[str, WeeklyDistribution],
+    seed: int,
+    our_team: int = DRAFT_SLOT,
+    n_rollouts: int = 8,
+    n_sims_per_rollout: int = 300,
+    n_candidates: int = DEFAULT_N_CANDIDATES,
+    temperature: float = DEFAULT_TEMPERATURE,
+    roster_decay: float = DEFAULT_ROSTER_DECAY,
+    adp_table: pl.DataFrame | None = None,
+    rankings: pl.DataFrame | None = None,
+) -> VarianceDecomposition:
+    """Force the top-greedy-value available player as `our_team`'s next
+    pick, run `n_rollouts` independent rollouts each finished off with
+    `n_sims_per_rollout` season simulations, and decompose the resulting
+    championship-probability estimates into within-rollout (season
+    simulation) and between-rollout (draft outcome) variance -- the exact
+    methodology used to derive `DEFAULT_N_ROLLOUTS`/
+    `DEFAULT_N_SIMS_PER_ROLLOUT` (see module docstring).
+
+    Defaults to a small, cheap `(n_rollouts, n_sims_per_rollout)` -- this
+    is *not* meant to replace a full re-measurement (which wants a much
+    larger `n_rollouts` for a tight SD-of-SD; see module docstring) but to
+    be cheap enough to run in CI as a staleness guard: if a future change
+    to the greedy policy or the opponent model shifts the true
+    between-rollout variance materially (the way the pre-fix RB2/QB5
+    policy suppressed it), this drifts far enough from
+    `MEASURED_BETWEEN_ROLLOUT_SD_PP` for
+    `tests/test_recommender.py::test_variance_decomposition_has_not_drifted`
+    to catch it, even though 8 rollouts alone could never precisely
+    re-derive the constant."""
+    replacement_means = {pos: float(dist.mean) for pos, dist in replacement_by_position.items()}
+    our_roster_pairs = state.rosters[our_team]
+    our_roster_players = _our_roster_players(our_roster_pairs, pool, replacement_by_position)
+    available_ids = [pid for pid in pool if pid not in state.drafted_ids]
+    candidates = prune_candidates(available_ids, pool, our_roster_players, replacement_means, n_candidates)
+    if not candidates:
+        raise ValueError("no available candidates to measure variance for")
+    top = candidates[0]
+
+    cand_pick = Pick(
+        overall_pick=state.next_overall_pick, team=our_team, player_id=top.player_id, position=top.position
+    )
+    state_after = DraftState.from_picks(
+        list(state.picks) + [cand_pick], n_teams=state.n_teams, rounds=state.rounds
+    )
+
+    rollout_seed_seq = np.random.SeedSequence(seed)
+    rollout_child_seeds = rollout_seed_seq.spawn(n_rollouts)
+    season_seed_seq = np.random.SeedSequence([seed, 1])
+    season_seeds = [int(s.generate_state(1)[0]) for s in season_seed_seq.spawn(n_rollouts)]
+
+    p_r = np.empty(n_rollouts, dtype=float)
+    for r in range(n_rollouts):
+        rollout_rng = np.random.default_rng(rollout_child_seeds[r])
+        final = run_rollout(
+            state_after,
+            pool,
+            model,
+            replacement_by_position,
+            rollout_rng,
+            our_team=our_team,
+            temperature=temperature,
+            roster_decay=roster_decay,
+            adp_table=adp_table,
+            rankings=rankings,
+        )
+        rosters = _rosters_for_season(final, pool, replacement_by_position)
+        season_result = simulate_season(
+            rosters, n_sims=n_sims_per_rollout, seed=season_seeds[r], replacement_means=replacement_means
+        )
+        p_r[r] = season_result.championship_probabilities[our_team - 1]
+
+    total_variance = float(p_r.var(ddof=1))
+    within_rollout_variance = float((p_r * (1 - p_r)).mean() / n_sims_per_rollout)
+    between_rollout_variance = total_variance - within_rollout_variance
+
+    return VarianceDecomposition(
+        player_id=top.player_id,
+        n_rollouts=n_rollouts,
+        n_sims_per_rollout=n_sims_per_rollout,
+        mean_championship_probability=float(p_r.mean()),
+        total_variance=total_variance,
+        within_rollout_variance=within_rollout_variance,
+        between_rollout_variance=between_rollout_variance,
+    )
+
+
 def recommend_pick(
     state: DraftState,
     pool: Mapping[str, PlayerDistribution],
@@ -310,7 +507,7 @@ def recommend_pick(
     not a case to silently redirect.
 
     See the module docstring for: how candidates are pruned, why
-    `n_rollouts`/`n_sims_per_rollout` default to 25/600 (derived from a
+    `n_rollouts`/`n_sims_per_rollout` default to 65/500 (derived from a
     measured variance decomposition, not chosen and justified after the
     fact), why common random numbers are used across candidates, and how
     `indistinguishable_from_leader` is computed.

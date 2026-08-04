@@ -372,3 +372,59 @@ def test_real_recommendation_at_pick_13_shows_roster_awareness(real_fixtures):
             f"p_champ={c.championship_probability * 100:5.2f}% se={c.standard_error * 100:4.2f}pp"
         )
     assert len(result.candidates) > 0
+
+
+# ---------------------------------------------------------------------------
+# Staleness guard: catch a future policy/model change silently invalidating
+# MEASURED_BETWEEN_ROLLOUT_SD_PP / MEASURED_WITHIN_ROLLOUT_SD_AT_5000_PP
+# (and therefore DEFAULT_N_ROLLOUTS/DEFAULT_N_SIMS_PER_ROLLOUT) the way the
+# pre-fix greedy policy silently invalidated the original 2.00pp figure --
+# see recommender.py's module docstring, "Measured variance decomposition".
+#
+# This is deliberately cheap (small n_rollouts/n_sims_per_rollout, one real
+# pick), not a precise re-measurement -- it cannot pin down the constant to
+# the precision the full re-measurement did, only catch an order-of-
+# magnitude drift (the ~2.00pp -> ~3.5-6pp kind that actually happened
+# here). A tight, expensive re-measurement belongs in a task report, not in
+# every CI run.
+
+
+def test_variance_decomposition_has_not_drifted(real_fixtures):
+    from ffdraft.draft.recommender import (
+        MEASURED_BETWEEN_ROLLOUT_SD_PP,
+        MEASURED_WITHIN_ROLLOUT_SD_AT_5000_PP,
+        measure_variance_decomposition,
+    )
+
+    pool, replacement, model, n_teams, draft_slot, rounds, adp_table, rankings = real_fixtures
+    state = DraftState.from_picks([], n_teams=n_teams, rounds=rounds)
+
+    decomp = measure_variance_decomposition(
+        state, pool, model, replacement, seed=20260803, our_team=1,
+        n_rollouts=8, n_sims_per_rollout=300,
+        adp_table=adp_table, rankings=rankings,
+    )
+    print(
+        f"\nStaleness guard (n_rollouts=8, n_sims_per_rollout=300): "
+        f"between-rollout SD={decomp.between_rollout_sd_pp:.2f}pp "
+        f"(recorded {MEASURED_BETWEEN_ROLLOUT_SD_PP:.2f}pp), "
+        f"within-rollout SD={decomp.within_rollout_sd_pp:.2f}pp "
+        f"(recorded {MEASURED_WITHIN_ROLLOUT_SD_AT_5000_PP:.2f}pp at S=5,000)"
+    )
+
+    # Between-rollout SD: a wide multiplicative band (0.4x-2.5x the
+    # recorded figure) around MEASURED_BETWEEN_ROLLOUT_SD_PP -- loose
+    # enough that n_rollouts=8's own sampling noise (SD-of-SD roughly
+    # +-27% of the true value at this n) does not make this flaky on an
+    # unchanged policy, but tight enough to catch a real multi-x drift like
+    # the one this guard exists because of. If this legitimately fails
+    # after an intentional policy/opponent-model change, re-run the full
+    # re-measurement (see module docstring) and update
+    # MEASURED_BETWEEN_ROLLOUT_SD_PP/MEASURED_WITHIN_ROLLOUT_SD_AT_5000_PP
+    # and the DEFAULT_N_ROLLOUTS/DEFAULT_N_SIMS_PER_ROLLOUT allocation
+    # derived from them -- do not just widen this band.
+    assert 0.4 * MEASURED_BETWEEN_ROLLOUT_SD_PP <= decomp.between_rollout_sd_pp <= 2.5 * MEASURED_BETWEEN_ROLLOUT_SD_PP, (
+        f"between-rollout SD {decomp.between_rollout_sd_pp:.2f}pp has drifted materially from the "
+        f"recorded {MEASURED_BETWEEN_ROLLOUT_SD_PP:.2f}pp -- the DEFAULT_N_ROLLOUTS/"
+        "DEFAULT_N_SIMS_PER_ROLLOUT allocation in recommender.py needs re-deriving, not this test loosened."
+    )
