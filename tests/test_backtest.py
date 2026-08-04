@@ -166,11 +166,50 @@ def test_real_team_weekly_totals_falls_back_to_replacement_for_unfilled_slot():
     weekly_lookup = {"only_rb": {1: 20.0}}
     totals, n_fb = real_team_weekly_totals(
         [("only_rb", "RB")], weekly_lookup, {}, REPLACEMENT, replacement_means,
-        np.random.default_rng(1), n_weeks=1,
+        np.random.default_rng(1), {"only_rb": 15.0}, n_weeks=1,
     )
     assert n_fb == 0
     assert totals.shape == (1,)
     assert totals[0] > 0  # real RB score plus a pile of replacement-level slots
+
+
+def test_lineup_is_chosen_ex_ante_but_scored_on_realized_points():
+    """The lineup must be picked on *projected* means and scored on
+    *realized* points. Choosing it on realized points is hindsight, and it
+    silently favours depth at FLEX-eligible positions -- worth +5.75pp to a
+    depth-stacked roster (docs/HANDOFF.md 7b, test 6). See
+    `real_team_weekly_totals`.
+
+    The league starts 2 RB + 2 FLEX, so five RBs are needed to force a real
+    bench decision. Four are well projected and all bust (1.0 each); the
+    fifth is projected at replacement level and explodes for 99.0. An
+    ex-ante manager starts the four he projected and scores 4.0 from RBs.
+    Hindsight would start the 99.
+    """
+    replacement_means = {"RB": 2.0, "WR": 3.0, "TE": 4.0, "QB": 1.0, "K": 5.0, "DST": 6.0}
+    picks = [(f"rb{i}", "RB") for i in range(5)]
+    weekly_lookup = {f"rb{i}": {1: 1.0} for i in range(4)} | {"rb4": {1: 99.0}}
+    projected = {"rb0": 20.0, "rb1": 19.0, "rb2": 18.0, "rb3": 17.0, "rb4": 2.0}
+    totals, _ = real_team_weekly_totals(
+        picks, weekly_lookup, {}, REPLACEMENT, replacement_means,
+        np.random.default_rng(1), projected, n_weeks=1,
+    )
+    # 4 started RBs x 1.0 realized, plus every other slot at replacement:
+    # QB 1.0 + WR 2x3.0 + TE 4.0 + K 5.0 + DST 6.0 = 22.0
+    assert totals[0] == pytest.approx(4.0 + 22.0), (
+        "lineup was chosen on realized scores (hindsight), not projected means"
+    )
+
+
+def test_a_player_with_no_projection_falls_back_to_his_replacement_mean():
+    """A pick with no entry in `projected_mean` must not crash and must not
+    be treated as projecting zero -- replacement level is the right prior."""
+    replacement_means = {"RB": 2.0, "WR": 3.0, "TE": 4.0, "QB": 1.0, "K": 5.0, "DST": 6.0}
+    totals, _ = real_team_weekly_totals(
+        [("unknown_rb", "RB")], {"unknown_rb": {1: 12.0}}, {}, REPLACEMENT,
+        replacement_means, np.random.default_rng(1), {}, n_weeks=1,
+    )
+    assert totals[0] > 0
 
 
 def test_real_season_champion_returns_a_valid_team_and_is_deterministic():
@@ -194,8 +233,8 @@ def test_real_season_champion_returns_a_valid_team_and_is_deterministic():
             "fantasy_points": [float(t) for t in range(1, N_TEAMS + 1) for _ in range(2)],
         }
     )
-    champ_a, _ = real_season_champion(state, weekly_holdout, REPLACEMENT, replacement_means, seed=42)
-    champ_b, _ = real_season_champion(state, weekly_holdout, REPLACEMENT, replacement_means, seed=42)
+    champ_a, _ = real_season_champion(state, weekly_holdout, REPLACEMENT, replacement_means, seed=42, projected_mean={})
+    champ_b, _ = real_season_champion(state, weekly_holdout, REPLACEMENT, replacement_means, seed=42, projected_mean={})
     assert champ_a == champ_b
     assert 1 <= champ_a <= N_TEAMS
 

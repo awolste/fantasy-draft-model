@@ -102,6 +102,7 @@ def main() -> None:
     args = parser.parse_args()
 
     ctx = fit_holdout_context()
+    projected_mean = {pid: float(p.distribution.mean) for pid, p in ctx.pool.items()}
     contenders = ("engine", "engine_defer_k", "vor_only", "adp")
     wins: dict[str, list[int]] = {c: [] for c in contenders}
 
@@ -112,6 +113,7 @@ def main() -> None:
             champ, _ = real_season_champion(
                 state, ctx.weekly_holdout, ctx.replacement_by_position, ctx.replacement_means,
                 seed=seed + SCORE_SEED_OFFSET,
+                projected_mean=projected_mean,
             )
             wins[c].append(1 if champ == DRAFT_SLOT else 0)
     elapsed = time.perf_counter() - t0

@@ -580,11 +580,33 @@ def real_team_weekly_totals(
     replacement_by_position: Mapping[str, object],
     replacement_means: Mapping[str, float],
     rng: np.random.Generator,
+    projected_mean: Mapping[str, float],
     n_weeks: int = N_SCORE_WEEKS,
 ) -> tuple[np.ndarray, int]:
-    """One team's optimal-lineup total for each of `n_weeks` real weeks,
-    via `sim.lineup.solve_lineup` on that week's real (or replacement-
-    fallback) scores. Returns `(totals, n_fallback)`."""
+    """One team's weekly lineup total for each of `n_weeks` real weeks.
+
+    The lineup is chosen **ex ante**, on each player's projected mean, and
+    then scored on that player's *realized* points for the week. Weekly
+    availability is real, because a manager does know who is inactive
+    before setting a lineup -- it is the week's *scores* they cannot see.
+
+    This is deliberate and was a defect fix. Choosing the lineup on
+    realized scores (what this function did originally) is perfect
+    hindsight, and while it is applied equally to all ten teams it is
+    **not** equal across roster *shapes*: a roster with many FLEX-eligible
+    players gets to pick the best 6 of N after the fact, while a single-
+    slot position (QB, TE, K) gains nothing from depth. Measured, that was
+    worth **+5.75pp** of championship probability to a depth-stacked
+    ADP-following roster and ~0 to the engine's -- i.e. it silently
+    decided the backtest. See docs/HANDOFF.md 7b, tests 6 and 8.
+
+    `projected_mean` maps player_id -> projected weekly mean (typically
+    `{pid: p.distribution.mean for pid, p in ctx.pool.items()}`). A player
+    missing from it falls back to his position's replacement mean, which
+    is the right prior for a pick with no projection behind it.
+
+    Returns `(totals, n_fallback)`.
+    """
     players = [
         resolve_real_player_weeks(
             pid, pos, weekly_lookup, kicker_gsis_by_name, replacement_by_position, rng, n_weeks
@@ -594,8 +616,28 @@ def real_team_weekly_totals(
     n_fallback = sum(1 for p in players if p.used_replacement_fallback)
     totals = np.empty(n_weeks, dtype=float)
     for wk in range(n_weeks):
-        roster = [RosterPlayer(p.player_id, p.position, p.scores[wk], p.available[wk]) for p in players]
-        totals[wk] = solve_lineup(roster, replacement_means).total_points
+        realized = {p.player_id: p.scores[wk] for p in players}
+        roster = [
+            RosterPlayer(
+                p.player_id,
+                p.position,
+                projected_mean.get(p.player_id, replacement_means[p.position]),
+                p.available[wk],
+            )
+            for p in players
+        ]
+        result = solve_lineup(roster, replacement_means)
+        total = 0.0
+        for slot in result.slots:
+            if slot.player_id is None:
+                # An unfilled slot scores replacement, and `solve_lineup`
+                # has already priced it (including FLEX, which uses the
+                # best of the FLEX-eligible group rather than a replacement
+                # level of its own). Reuse that rather than re-deriving it.
+                total += slot.points
+            else:
+                total += realized[slot.player_id]
+        totals[wk] = total
     return totals, n_fallback
 
 
@@ -605,16 +647,23 @@ def real_season_champion(
     replacement_by_position: Mapping[str, object],
     replacement_means: Mapping[str, float],
     seed: int,
+    projected_mean: Mapping[str, float],
     n_weeks: int = N_SCORE_WEEKS,
     regular_season_weeks: int = REGULAR_SEASON_WEEKS,
     playoff_byes: int = PLAYOFF_BYES,
 ) -> tuple[int, int]:
-    """Play one completed draft's ten rosters through real 2024 results.
-    Reuses `sim.season`'s own schedule/seeding/playoff-bracket machinery
-    (`build_regular_season_schedule`, `_seed_teams`, `_run_playoffs`) with
-    `n_sims=1` so this stays bracket-for-bracket identical to the rest of
-    the project's simulated seasons -- only the per-week *scores* are real
-    rather than sampled. Returns `(champion_team_1indexed, n_fallback)`.
+    """Play one completed draft's ten rosters through the holdout season's
+    real results. Reuses `sim.season`'s own schedule/seeding/playoff-bracket
+    machinery (`build_regular_season_schedule`, `_seed_teams`,
+    `_run_playoffs`) with `n_sims=1` so this stays bracket-for-bracket
+    identical to the rest of the project's simulated seasons -- only the
+    per-week *scores* are real rather than sampled.
+
+    Lineups are set **ex ante** from `projected_mean` -- see
+    `real_team_weekly_totals` for why that matters and what setting them
+    from realized scores was silently doing to this comparison.
+
+    Returns `(champion_team_1indexed, n_fallback)`.
     """
     weekly_lookup = _weekly_lookup(weekly_holdout, n_weeks)
     kicker_lookup = _kicker_gsis_by_name(weekly_holdout)
@@ -631,6 +680,7 @@ def real_season_champion(
             replacement_by_position,
             replacement_means,
             rng,
+            projected_mean,
             n_weeks,
         )
         team_totals[team - 1, 0, :] = totals
@@ -678,6 +728,7 @@ def run_realization(
     states: dict[str, DraftState] = {}
     champions: dict[str, int] = {}
     n_fallback: dict[str, int] = {}
+    projected_mean = {pid: float(p.distribution.mean) for pid, p in ctx.pool.items()}
 
     for contender in CONTENDERS:
         state = run_one_draft(seed, our_team, contender, ctx, n_teams=n_teams)
@@ -688,6 +739,7 @@ def run_realization(
             ctx.replacement_by_position,
             ctx.replacement_means,
             seed=seed + score_seed_offset,
+            projected_mean=projected_mean,
         )
         champions[contender] = champ
         n_fallback[contender] = n_fb
