@@ -109,7 +109,7 @@ These were deliberate. Do not silently reverse them.
 **Blocking the headline deliverable:**
 
 1. **Task 6 — the backtest has been run, and the engine loses.** `scripts/backtest.py` / `src/ffdraft/backtest.py`. Full leakage audit passed (every fitted component checked against seasons through 2023 only; see `tests/test_backtest.py::test_fit_report_seasons_never_include_the_holdout_season`). N=600 draft realizations, same-seed paired comparison: **engine 3.00% ± 0.70% SE vs. ADP-baseline 16.50% ± 1.52% SE — engine minus ADP = −13.50pp ± 1.65pp SE**, an ~8-sigma deficit, not noise. Random-legal scored 0.00%, so the engine barely clears a policy with no skill at all. The gap concentrates in rounds 3–6 (mean real-2024 points-per-game of our picks there trails ADP's picks at the same slot by 2-3 ppg; picks 1-2 are roughly at parity or slightly ahead). **Do not treat the engine as validated.** Diagnosis is under way — see §7b below for what has already been ruled out.
-1b. **The next diagnostic step is specified and not yet run:** put the ADP policy through the engine's own code path and confirm it still scores ~16%. See the end of §7b. This is cheap and decisive about whether the harness or the engine is at fault, and everything else downstream depends on the answer.
+1b. **Diagnosis has advanced substantially (tests 3-6, §7b).** ~6pp of the deficit is now shown to be a *scoring-rule artifact*: `real_season_champion` sets lineups with perfect hindsight, which pays FLEX depth a premium no manager could collect. `real_season_champion` should be treated as defective for comparing rosters of different shapes, and fixing it is a well-specified task. The remaining ~9.25pp is real and unexplained; the evidence now points at the **replacement means**, QB first. See the end of §7b.
 
 2. **Task 7 — the structure study has not been run**, and **should not run until item 1 is resolved.** It would play out each structure using a policy known to lose to ADP by 14pp, so any answer would be an artifact of a broken drafter rather than a fact about roster construction. 0RB vs Hero RB vs 2RB:1WR from slot 8, with error bars. Structures currently differentiate only modestly in position counts (0RB ends RB3/WR8, 2RB ends RB4/WR7) but differ substantially in player quality, which is what the comparison measures. Given RB≈WR over replacement, **be suspicious of any large structural edge** and investigate before believing it.
 
@@ -188,9 +188,129 @@ Eliminated: stale projections (Test 1), wasted roster spots (rung 4), VOR-as-har
 
 **The gap is essentially undiminished and unexplained.** The engine carries the market's information faithfully (Test 1), applies a scarcity correction that helps (+2.17pp), and still loses to reading ADP off a page by 14pp.
 
-**Next check to run, and the cheapest decisive one:** run the ADP policy *through the engine's own code path* — same rollout, same roster construction, same scoring — and confirm it still scores ~16%. If it drops, the harness is disadvantaging our slot rather than the engine's picks being bad, and the leakage audit would not have caught that. If it holds at 16%, the engine's picks genuinely are that much worse and the approach itself is the problem.
+### Test 3 — harness fault is dead by construction (no run needed)
 
-Until that check is done, **do not conclude the approach is unsalvageable, and equally do not conclude the harness is at fault.** Both remain live.
+The check specified above — "run the ADP policy through the engine's own code path" — turned out to be **a no-op, answerable by reading `run_one_draft`**. Every contender already goes through `run_rollout` with the same opponent model, the same `adp_table`, the same `rankings`, and the same `real_season_champion` scoring. The *only* thing that varies is `pick_policy`. Neither the engine's `_choose_our_pick` nor `adp_pick_policy` consumes `rng`, so opponent picks are drawn from an identical RNG stream in both — the contenders are perfectly paired, pick for pick.
+
+So ADP's 16.17% **is** ADP through the engine's code path. **The harness does not disadvantage our slot. The engine's picks genuinely are that much worse.** Do not re-run this.
+
+(One latent flaw noticed while checking: `random_legal_pick_policy` *does* draw from the shared `rng`, so the random contender's opponents run on a shifted stream. It does not bias the distribution and random scores 0% regardless, but it breaks CRN pairing for that one contender.)
+
+### Test 4 — found it: the engine reaches, and the reaching is concentrated in K and TE
+
+`scripts/diagnose_picks.py` prints our 18 picks side by side, engine vs ADP, with each player's real 2024 ppg. **Nobody had ever looked at the picks themselves** — only at aggregates. The defect is visible immediately.
+
+Define **reach = (player's ADP) − (overall pick spent on him)**. Positive means we took him earlier than the market would have, i.e. we burned that many picks of value. Over 8 seeds × 18 picks = 144 picks each:
+
+| | mean reach | median | picks reached ≥30 |
+|---|---|---|---|
+| engine | −4.4 | −7.4 | **8 / 144** |
+| adp | −13.2 | −9.5 | **0 / 144** |
+
+By position, the engine:
+
+```
+K    n=10  mean reach  +48.9      <- the defect
+TE   n=16  mean reach  +12.5
+QB   n=24  mean reach   -2.8
+WR   n=48  mean reach  -11.4
+RB   n=46  mean reach  -15.4
+```
+
+ADP's worst position sits at −11.1 and it never reaches ≥30 on any pick. **The engine drafts a kicker roughly 49 picks before the market does** — concretely, Justin Tucker (ADP 141) taken in *round 8*, in both sampled seeds. It also takes Luke Musgrave (ADP 152) in round 13. RB and WR timing is essentially the same as ADP's, so the skill positions are not where this is lost.
+
+**This also shows hypothesis A was tested the wrong way.** `engine_capped` capped QB and K *counts* (QB≤2, K≤1) and bought +0.67pp. It never touched *timing* — `engine_capped` still spends a round-8 pick on that one permitted kicker. The count was never the waste. The timing is.
+
+**Diagnosis:** the greedy value policy has no notion of **who will still be available at our next pick**. It takes the highest marginal value on the board right now, so it happily spends round 8 on the best kicker — who would still be there in round 17. ADP-following gets this right for free, because ADP order *is* survival order. This is the classic "don't draft a kicker in round 8" rule, and the value function does not encode it.
+
+### Test 4b — the kicker is NOT the disease
+
+`scripts/diagnose_k_timing.py`. The engine's own greedy policy, unchanged, except K is undraftable until the final round. One variable. N=300, paired.
+
+```
+engine           2.00% ± 0.81%
+engine_defer_k   3.33% ± 1.04%
+vor_only         0.00% ± 0.00%
+adp             15.33% ± 2.08%
+
+engine_defer_k - engine :  +1.33pp  (SE 1.15pp)   <- not significant
+engine         - adp    : -13.33pp  (SE 2.23pp)
+```
+
+Fixing the single worst reach in the draft buys **+1.33pp ± 1.15** and closes a tenth of the gap. Same shape as hypothesis A. **Reaching is a symptom, not the disease.** This run also independently replicates the headline deficit (−13.33pp here vs −13.50pp originally, different N).
+
+### Test 5 — `vor_only` is 0.00%, but its draft board is fine
+
+The missing rung now exists: `vor_only` = static `argmax(mean − replacement_mean[pos])`, no lineup solve, no bench term, no FLEX logic. It scored **0.00%**, matching `proj_mean` and `random`.
+
+The obvious inference — "our VOR ordering is garbage" — is **wrong**, and `scripts/diagnose_vor_scale.py` shows why. The top of the static VOR board is a perfectly reasonable draft board:
+
+```
+ 1 McCaffrey  RB 24.72 vor 14.85 (adp 1.4)     6 Kelce   TE 17.25 vor 9.05 (adp 24.4)
+ 2 Tyreek Hill WR 23.83 vor 13.78 (adp 2.6)    7 St.Brown WR 18.86 vor 8.81 (adp 6.2)
+ 3 Breece Hall RB 20.68 vor 10.81 (adp 2.2)    8 Bijan    RB 18.63 vor 8.76 (adp 4.9)
+ 4 CeeDee Lamb WR 20.56 vor 10.51 (adp 3.7)    9 Chase    WR 17.74 vor 7.69 (adp 7.2)
+ 5 Josh Allen  QB 27.55 vor  9.58 (adp 25.1)  10 Gibbs    RB 17.30 vor 7.43 (adp 9.4)
+```
+
+Replacement means (pts/wk): QB 17.96, WR 10.05, RB 9.88, TE 8.20, K 7.94, DST 7.50.
+
+So the projections and the scarcity correction are both sane, and a policy built on them still wins zero times in 300. **A sane ranking is not sufficient.** That is the single most important fact established so far, and it points away from the value function entirely.
+
+### Test 6 — the live hypothesis: the *scoring* rewards depth, via hindsight
+
+Where the position mixes actually land, per 18-round draft:
+
+```
+adp     RB 7  WR 8  QB 3           -> 15 FLEX-eligible, zero TE
+engine  RB 7  WR 5  QB 3  TE 2  K 1 -> 12 FLEX-eligible
+```
+
+ADP-following drafts **zero tight ends**, fills its TE slot at replacement all season, and still beats us by 13pp. Meanwhile `real_season_champion` calls `solve_lineup` on **that week's realized scores** — perfect hindsight, every week, every team.
+
+Hindsight is equal across teams but **not across roster shapes**. A roster with 15 FLEX-eligible players picks the best 6 of 15 ex post; a single-slot position (QB, TE, K) gains nothing from depth. So the scoring rule may be paying ADP-following a depth premium that no real manager could collect, and that the engine — which spends picks on TE/K — cannot access.
+
+This reframes the whole diagnosis: **the fault may be in the harness after all, but in the *scoring* step, not the drafting.** Test 3 ruled out the drafting path; it says nothing about scoring.
+
+`scripts/diagnose_hindsight.py` scores the *same* drafts two ways — `hindsight` (what the backtest does) and `ex_ante` (lineup chosen on projected means, then scored on realized points, which is what a manager can actually do). **N=400:**
+
+| contender | scoring | rate |
+|---|---|---|
+| engine | hindsight | 2.25% ± 0.74% |
+| adp | hindsight | **17.75% ± 1.91%** |
+| engine | ex_ante | 2.75% ± 0.82% |
+| adp | ex_ante | **12.00% ± 1.63%** |
+
+```
+adp - engine, hindsight : +15.50pp  (SE 2.07pp)
+adp - engine, ex_ante   :  +9.25pp  (SE 1.76pp)
+```
+
+**Confirmed, and the asymmetry is exactly as predicted.** Removing hindsight costs the ADP roster **−5.75pp** (17.75 → 12.00) and costs the engine roster **nothing** (2.25 → 2.75, i.e. it gains slightly). Depth in FLEX-eligible positions is only worth that much when you can pick your starters after the fact. **About 6pp of the ~15pp deficit is an artifact of the scoring rule, not of the engine's picks.**
+
+An independent corroboration that the hindsight number is the broken one: Stage 2 measured the *best-drafted* 2024 roster at ~16% championship probability. Under hindsight scoring, plain ADP-following scores **17.75% — above that ceiling**. Under ex-ante scoring it scores 12.00%, comfortably inside it. The hindsight figure is not credible on its own terms.
+
+Note the Stage 2 caveat that applies directly here: hindsight bias was measured at "max 2.5pp swing" on *real* 2024 rosters, with the explicit warning that those rosters were not deliberately variance-stacked. They were not deliberately **depth**-stacked either, so that 2.5pp never bounded this effect — and the real figure for a depth-stacked roster is 5.75pp.
+
+### Where the diagnosis stands after tests 3-6
+
+**Resolved:** ~6pp of the deficit is a scoring-rule artifact. The backtest as written overstates the engine's deficit by that much, and `real_season_champion` should be considered defective for comparing rosters of *different shapes*. Fixing it is a real, well-specified task.
+
+**Still unexplained: the remaining ~9.25pp.** Ex ante, the engine scores **2.75% against a 10% baseline** — it is still much worse than drafting at random *among the ten teams*, and far worse than reading ADP off a page. That is the live problem.
+
+What is now known about it, and constrains any future hypothesis:
+- It is not the projections (Test 1), not stale information (Test 1), not wasted roster spots (rung 4), not reach timing (Test 4b), and not the roster-construction machinery on top of VOR — because **static VOR with none of that machinery also scores 0.00%** (Test 5).
+- The draft board produced by our projections + scarcity correction is *sane* (Test 5). Whatever is wrong survives having a correct-looking ranking.
+- Both the engine and `vor_only` lose to ADP, and both differ from ADP in the same direction: **more QB/TE, fewer RB/WR**. ADP's top-40 is RB 17 / WR 18 / QB 3 / TE 2; our VOR top-40 is RB 12 / WR 16 / QB 8 / TE 4. That positional tilt is the one thing every losing policy shares and ADP does not.
+- The tilt comes from the replacement means: **QB replacement is 17.96 with QB30 at 18.01** — the QB curve is nearly flat past the top few, so elite-QB VOR (Josh Allen +9.58) prices him near the top of the board. If QB replacement is too *low* — e.g. if what you can actually stream weekly is better than 17.96 — every QB is overpriced and the tilt follows mechanically.
+
+**The next check, and the one the evidence now points at:** validate the replacement means as an order statistic against real 2024 waiver-wire availability, QB first. A single miscalibrated replacement level would explain the shared positional tilt across every losing policy, which no policy-level fix has touched.
+
+### Also important: the backtest never tested the recommender
+
+`backtest.py`'s module docstring is explicit and honest about this, but it is easy to miss and it changes what the gate means. `contender="engine"` uses `run_rollout`'s **greedy `draft.value` policy**, not `draft.recommender.recommend_pick`, because the real recommender costs ~5.6 min/pick (N×18×5.6min is infeasible).
+
+The docstring argues the Monte-Carlo layer "does not change how any later pick is chosen" — true — but it *does* choose the immediate pick, at every one of our 18 picks. So **the gate has never been run against the actual recommender.** Note the caveat before getting hopeful: `recommend_pick`'s rollouts use this same greedy policy for all of our *future* picks, so it inherits the same survival blind spot in its continuations — a candidate evaluated as "don't take the kicker now" will often just take the kicker one round later in the rollout, muting the comparison.
 
 ### Minor issue noticed in passing
 
