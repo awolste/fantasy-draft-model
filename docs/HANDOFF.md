@@ -126,7 +126,7 @@ Since commit `2b845cc`, lineups are chosen on **projected means** and scored on 
 5. **A recommendation honestly costs ~5.6 minutes** for 15 candidates (N=65 rollouts × M=500 sims). **This is too slow for a live draft**, where you have ~90 seconds. Stage 4 needs a decision: pre-compute likely draft states, cut rollouts and accept wider error bars, or restrict to a pre-selected shortlist. This is a usage decision, not an engineering one.
 6. **Test suite takes ~12 minutes**, roughly quadrupled because the pick-8/pick-13 real-data tests use full production budgets. Consider pinning a smaller explicit budget in those two tests.
 7. **`sources/nflverse.py` imports `models/kicking.py`** — a Stage 1 → Stage 2 layering inversion. Cheap to fix by moving `kicking.py` beside `scoring.py`.
-8. **Python runs under Rosetta x86-64 emulation**, not native ARM. Polars warns it may crash, and one full-suite run segfaulted when two heavy Polars processes ran concurrently. Switching to a native ARM Python is worth doing before more heavy simulation work.
+8. **Python runs under Rosetta x86-64 emulation**, not native ARM. This caused a real, diagnosed memory-corruption failure and has been **mitigated** with `polars[rtcompat]` — see §9 for the full diagnosis and for why `POLARS_SKIP_CPU_CHECK=1` must never be set. Switching to a native ARM Python remains worthwhile for speed.
 9. **`data/manager_labels.csv` is filled in** with real manager names (gitignored). Never read, print, or commit it.
 
 ## 7b. Diagnosing the backtest failure — state as of 2026-08-04
@@ -437,6 +437,77 @@ The docstring argues the Monte-Carlo layer "does not change how any later pick i
 
 The holdout pool excludes 15 unmatched players, including **Hollywood Brown at rank 86** — genuinely draftable in 2024, and the same name-normalization gap as Stage 1 (he is "Marquise Brown" in the crosswalk). Too small to explain 13.5pp, and it handicaps every contender equally rather than biasing between them, but worth fixing.
 
+## 7c. Task 7 — the structure study. ANSWERED: structure does not matter.
+
+`scripts/structure_study.py`. First three picks (overall 8/13/28) forced into each pattern, taking the best available at the required position by the engine's own value function, unconstrained from round 4. Scored on **real** weekly results across 2020–2024, N=400 per season, opponents paired by seed so every structure faces an identical board. Run on the **fixed Polars runtime** (see §9).
+
+**Championship rate from slot 8, by season:**
+
+| season | 0RB | hero_RB | 2RB_1WR | engine_free | adp |
+|---|---|---|---|---|---|
+| 2020 | 16.00% | 12.50% | 17.00% | 12.75% | 6.75% |
+| 2021 | 21.75% | 19.00% | 17.75% | 19.25% | 9.50% |
+| 2022 | 5.75% | 5.75% | 6.50% | 21.75% | 8.50% |
+| 2023 | 21.00% | 18.25% | 9.25% | 4.00% | 9.00% |
+| 2024 | 3.75% | 7.75% | 9.00% | 2.25% | 12.00% |
+
+**Pooled (equal weight per season):**
+
+```
+0RB          13.65%  (between-season SE 3.78pp)
+hero_RB      12.65%  (between-season SE 2.68pp)
+2RB_1WR      11.90%  (between-season SE 2.29pp)
+engine_free  12.00%  (between-season SE 3.92pp)
+adp           9.15%  (between-season SE 0.85pp)
+```
+
+**Pairwise, paired by seed within season (row − column, pp):**
+
+```
+                0RB          hero_RB      2RB_1WR      engine_free
+0RB             -            +1.00+-1.39  +1.75+-2.90  +1.65+-5.25
+hero_RB         -1.00+-1.39  -            +0.75+-2.26  +0.65+-4.94
+2RB_1WR         -1.75+-2.90  -0.75+-2.26  -            -0.10+-4.04
+```
+
+### The answer
+
+**There is no measured difference between 0RB, Hero RB, and 2RB:1WR.** Every pairwise gap is ≤1.75pp against SEs of 1.4–2.9pp — all well inside one standard error, let alone two. The ordering (0RB > hero_RB > 2RB_1WR) is not meaningful and should not be reported as a ranking.
+
+This is exactly what Stage 2 predicted and is the main reason to believe it: **a rostered RB starter is worth ~6.4 points/week over replacement and a WR ~6.5** (§6). If RB and WR are worth the same at the margin, then how you order them across three picks cannot matter much. Two independent measurements now agree.
+
+**Do not let anyone re-litigate this by pointing at a single season.** The season-to-season swing dwarfs the structural effect by an order of magnitude:
+
+```
+range across seasons (max - min):  0RB 18.00pp   hero_RB 13.25pp
+                                   2RB_1WR 11.25pp   engine_free 19.50pp   adp 5.25pp
+```
+
+0RB "wins" 2023 by 11.75pp over 2RB:1WR and *loses* 2024 by 5.25pp. Picking a structure off one season is picking noise.
+
+### The finding that actually matters, and its caveat
+
+The largest effects in this table are not between structures at all — they are between **constrained and unconstrained** drafting, and they run in opposite directions in different seasons:
+
+```
+season  QB replacement  engine_free  mean(structures)  free - structures
+2020         19.31         12.75%         15.17%          -2.42pp
+2021         16.83         19.25%         19.50%          -0.25pp
+2022         16.36         21.75%          6.00%         +15.75pp
+2023         18.37          4.00%         16.17%         -12.17pp
+2024         20.11          2.25%          6.83%          -4.58pp
+```
+
+Forcing RB/WR in the first three rounds means **not taking the early QB**. In 2022, when QB replacement was at its lowest (16.36) and elite QBs were most valuable, the unconstrained engine beat every structure by 15.75pp. In 2023 and 2024 the same freedom cost it 12.17pp and 4.58pp.
+
+**Caveat, and it is a real one:** r = −0.645 at n=5 is not significant, and 2021 breaks the pattern (second-lowest QB replacement, yet unconstrained drafting bought nothing). This is *consistent with* §7b test 8's r = −0.810 on a different quantity, but it is not independent confirmation — both are five points from the same five seasons. **Treat the QB-timing effect as the live hypothesis it is, not as an established result.**
+
+### Practical guidance for the 2026 draft
+
+1. **Do not pre-commit to a draft structure.** No structural rule was worth more than ~1.75pp, and none of that survives its error bar. Take the best available player.
+2. **The decision that carries real weight at picks 8 and 13 is whether to spend one on a quarterback**, and its payoff swings ±15pp depending on something unknowable in advance (how good streamable QBs turn out to be that year).
+3. Given that, the defensible position is to **size the QB bet down** rather than take it at full conviction — not because hedging is proven better, but because the upside and downside are comparable and the model cannot forecast which it will get. This is a judgement call, and it is recorded as one.
+
 ## 8. The recurring failure pattern — read this before trusting any number
 
 **Every genuine defect in this project produced plausible-looking output and raised no errors.** None were found by reading code. All were found by checking a reported number against raw data or against the artifact that actually mattered.
@@ -481,3 +552,24 @@ Caches are fingerprinted against their inputs and **raise `CacheStaleError`** if
 - Reviews are dispatched in parallel (read-only); implementers never run concurrently (git collisions).
 - Findings that change a documented number get written back into `docs/superpowers/plans/README.md` so they survive the session.
 - Numbers reported by subagents are spot-checked against raw data before being believed. This has caught real errors more than once, including one where the coordinator's own first check used the wrong baseline and nearly flagged a correct model as broken.
+
+## 9. Environment: Polars was running unsound, and this is now fixed
+
+**Found 2026-08-04, and it invalidates nothing measurably but could have.**
+
+The venv Python is **x86_64 running under Rosetta on an Apple M1 Pro**. Polars' x86_64 build requires AVX/AVX2/FMA/BMI1/BMI2/LZCNT/MOVBE, none of which Rosetta emulates. Polars detects this at import and warns that continuing "will likely result in a crash." That warning was correct.
+
+**The symptom.** A multi-season run died in `ids._load_prepared_ids` with `ShapeError: Series length 12269 doesn't match the DataFrame height of 12470`. That diagnosis is worth keeping:
+
+- The failing call is a **pure column select/cast**, which cannot change a frame's length.
+- So the *input* frame was internally ragged — one column at 12269 while the frame claimed 12470. Polars' invariants make that impossible in sound operation. It is a memory-safety symptom, not a data problem.
+- It is **intermittent**: the identical fit succeeded minutes earlier, and `load_crosswalk()` returns a stable `(11897, 5)` six times out of six in isolation. Neither number in the error matches the correct height.
+- It ran with **nothing else competing**, so it is not the concurrency segfault in open item 8 — same root cause, separate instance.
+
+**A process failure worth not repeating:** `POLARS_SKIP_CPU_CHECK=1` was being set to quiet the warning in command output. That flag bypasses a correctness-and-stability guard, and it was used for log tidiness. In a project whose stated primary risk is silent corruption (§8), suppressing that warning was exactly the wrong instinct. **Do not set it.**
+
+**The fix, applied:** `pip install 'polars[rtcompat]==1.43.2'`. Same Polars version, purely additive — it installs `polars-runtime-compat` beside the existing runtime, no downgrade, no removal, reversible with `pip uninstall polars-runtime-compat`. Verified: imports clean under `warnings.simplefilter('error')` and returns the correct crosswalk shape.
+
+**How much to distrust earlier numbers.** The failure mode here is a loud crash rather than quiet bad arithmetic, and the headline results replicated independently — the multi-season gate came out at +2.20pp through one scoring implementation and +2.45pp through a separate one, which corrupted inputs would not reliably produce. Direct evidence: the structure study's 2020 row from the *unsound* run (0RB 15.50 / hero 12.00 / 2RB 15.75 / free 12.25 / adp 7.00) versus the sound re-run (16.00 / 12.50 / 17.00 / 12.75 / 6.75) — differences of 0.25–1.00pp, comfortably inside Monte-Carlo noise at N=400. So the earlier conclusions look sound; they simply could not be *demonstrated* sound, which is why §7c was re-run before being reported.
+
+**Still worth doing:** switch to a native ARM Python (open item 8). `rtcompat` makes the current setup correct; a native build would make it correct *and* substantially faster, which matters given the suite already takes ~12 minutes.
