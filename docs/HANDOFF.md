@@ -33,12 +33,12 @@ Full K and DST scoring rules are in the spec. Two bands are **neutral, not missi
 |---|---|---|
 | 1 | Data foundation | **Complete**, merged to `main` |
 | 2 | Player + season model | **Complete**, merged to `main` |
-| 3 | Opponent model + optimizer | **5 of 7 tasks**, on branch `stage-3-optimizer` |
+| 3 | Opponent model + optimizer | **Complete (7 of 7)**, on branch `stage-3-optimizer`, unmerged |
 | 4 | Live draft assistant | Not started, no plan written |
 
 **Branch `stage-3-optimizer` is ahead of `main` and unmerged. 360 tests pass** (342 + 18 new backtest tests). Suite takes ~11-12 minutes.
 
-Stage 3 remaining: **Task 7 (the structure study — the headline deliverable)**, now built and unblocked.
+Stage 3 is **complete**. Task 7, the structure study, is **answered: draft structure does not matter** — 0RB, Hero RB and 2RB:1WR are statistically indistinguishable across 2020–2024. See §7c for the numbers and for the finding that does matter (the early-QB decision).
 
 Task 6 (the backtest) is done. Its original verdict was: *the engine loses to naive ADP-following on real 2024 results by 13.5pp ± 1.65pp*. **That verdict has since been overturned — see §7b tests 6-9.** Two things were wrong with it. (a) ~6pp of the deficit was an artifact of the scoring rule: `real_season_champion` set lineups with perfect hindsight, which pays FLEX depth a premium no real manager could collect. That is now fixed. (b) 2024 is the worst of the five usable holdout seasons for this engine. Re-run across 2020–2024 through the fixed production path, **the engine beats ADP in three of five seasons and averages +2.45pp against a between-season SE of 4.27pp** — not broken, but not demonstrated either.
 
