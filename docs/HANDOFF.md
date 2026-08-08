@@ -1,6 +1,6 @@
 # Handoff — 2026 Fantasy Draft Optimizer
 
-**Last updated:** 2026-08-04
+**Last updated:** 2026-08-08
 **Repo:** https://github.com/awolste/fantasy-draft-model (public)
 **Read this first**, then `docs/superpowers/specs/2026-08-02-ff-draft-2026-design.md` for the design and `docs/superpowers/plans/README.md` for the stage roadmap and the running constraints list.
 
@@ -717,3 +717,32 @@ Streamlit re-executes the entire script on every interaction. The first version 
 3. Load the page **before** the draft starts — fitting the context takes a few seconds and is cached per session.
 4. Enter every pick as it happens, including opponents'. Undo fixes a mis-entry.
 5. At our pick the recommendation computes automatically. Read the tie callout before the ranking: candidates flagged indistinguishable from the leader are equivalent, and the ordering among them is noise.
+
+## 12. Draft-day ingest verification — 2026-08-08
+
+`.venv/bin/python scripts/ingest_all.py`, exit 0. Recorded here because **the data itself is gitignored and must stay that way** (ESPN payloads identify real people, §8 / plans README), so this record is the only durable evidence of the refresh.
+
+**Row counts before → after:**
+
+| dataset | before | after | delta |
+|---|---|---|---|
+| `rankings_2026` | 517×6 | 515×6 | −2 |
+| `adp_2026` | 246×7 | 256×7 | +10 |
+| `weekly_stats` | 70775×29 | 70775×29 | 0 |
+| `adp_history` | 1375×7 | 1375×7 | 0 |
+| `league_drafts` | 1390×6 | 1390×6 | 0 |
+| `id_crosswalk` | 11897×5 | 11897×5 | 0 |
+
+Only the two live sources moved (FantasyPros −2 ranked players, FFC +10 in 2026 ADP); historical datasets unchanged. That is the expected shape of a same-day refresh — **a collapse in any of these is the signal to restore from backup, not to proceed.**
+
+**Validation:** no tracebacks; ID coverage 90.5–91.7% across gsis/espn/sleeper; all eight draft seasons complete.
+
+**Live context rebuilt and exercised:** pool **508 players**, board advances correctly to overall pick 8, top of board Ja'Marr Chase / Puka Nacua / Jahmyr Gibbs / Bijan Robinson / Jaxon Smith-Njigba. This check matters more than the row counts: `build_player_pool` raises on unmatched players rather than dropping them, so a crosswalk regression shows up as a *smaller pool*, not an error — confirming 508 and a coherent top-5 is what actually rules it out.
+
+**Privacy check on the ingest log**, run before reading it: zero GUID patterns, zero occurrences of the league ID, and the single `SWID` match was the line `league_managers: 18 distinct manager SWIDs` — a count, not values. Do this every time; the log is written by code that has ESPN payloads in scope.
+
+**Before re-running the ingest**, back up `data/` first (`tar czf <somewhere-outside-the-repo>/data_backup.tgz data/`). These are live external sources: an upstream schema change or a partial response would overwrite a working pool with a broken one, and there is no other copy.
+
+### Note on document dates
+
+Stage 4's spec, plan and several §-headers are dated **2026-08-04**; the actual date was **2026-08-08**. A session-start hook reported the earlier date and it was taken at face value. Filenames are left alone to avoid breaking links — treat every "2026-08-04" in Stage 4 material as 2026-08-08.
