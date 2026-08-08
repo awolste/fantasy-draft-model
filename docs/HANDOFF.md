@@ -508,7 +508,7 @@ Forcing RB/WR in the first three rounds means **not taking the early QB**. In 20
 
 1. **Do not pre-commit to a draft structure.** No structural rule was worth more than ~1.75pp, and none of that survives its error bar. Take the best available player.
 2. **The decision that carries real weight at picks 8 and 13 is whether to spend one on a quarterback**, and its payoff swings ±15pp depending on something unknowable in advance (how good streamable QBs turn out to be that year).
-3. Given that, the defensible position is to **size the QB bet down** rather than take it at full conviction — not because hedging is proven better, but because the upside and downside are comparable and the model cannot forecast which it will get. This is a judgement call, and it is recorded as one.
+3. ~~Size the QB bet down.~~ **SUPERSEDED — measured and contradicted, see §10.** Sweeping a QB-replacement penalty across 2020-2024 shows the mean championship rate *falls* as the tilt shrinks (11.47% at delta=0 down to 9.27% at delta=5). It buys lower season-to-season variance, which is worthless for a draft you run once. Leave the value function alone and take the best available player.
 
 ## 8. The recurring failure pattern — read this before trusting any number
 
@@ -620,6 +620,47 @@ Do not panic-discard everything; do check before quoting. The load-bearing resul
 
 **Rule going forward: no single-run number is trustworthy on this hardware.** Anything that matters must be replicated in a separate process, ideally by a different code path, and a disagreement between two runs of identical code should be treated as a runtime fault until proven otherwise — not explained away.
 
-### Status of the QB-tilt experiment
+### RESOLVED 2026-08-04: native ARM Python installed, corruption confirmed and fixed
+
+`uv python install cpython-3.11-macos-aarch64-none` (no sudo needed), venv at **`.venv-arm`**. The old x86_64 `.venv` is left in place as a fallback but **should not be used**. Note two dead ends: `/opt/homebrew` exists but has no `brew` binary, and `uv` is itself an x86_64 binary so `uv python list` only advertises x86_64 — pass the explicit `-macos-aarch64-none` key.
+
+Verified native: `platform.machine() == 'arm64'`, Polars 1.43.2 imports clean under `warnings.simplefilter('error')`, and only the standard `polars-runtime-32` is installed — the `rtcompat` shim is gone, because there is nothing left to compensate for.
+
+**Suite: 362 passed in 7:37**, versus 11:30 under Rosetta — a 34% speedup that also addresses open item 6.
+
+**The corruption is confirmed as a runtime fault, and it is fixed.** Re-running the identical sweep on ARM, the `delta=0` control arm — which is identical by construction to `engine_free` — now reproduces it in every season:
+
+| season | delta=0 on ARM | engine (x86 backtest) | engine_free (x86 study) | the corrupted run |
+|---|---|---|---|---|
+| 2020 | 12.00% | 12.00% | 12.75% | 11.00% |
+| 2021 | **17.67%** | 18.75% | 19.25% | **5.33%** |
+| 2022 | **20.33%** | 21.50% | 21.75% | **8.33%** |
+| 2023 | 4.00% | 4.00% | 4.00% | 2.33% |
+| 2024 | 3.33% | 2.50% | 2.25% | 2.67% |
+
+Mean QB per roster is back to **3.00** (the corrupted run said 3.95). Every season now agrees within Monte-Carlo noise.
+
+**The multi-season gate also replicates on the sound runtime: engine − adp = +2.86pp (between-season SE 4.15pp), beating ADP in 3 of 5 seasons**, against +2.45pp ± 4.27pp measured on x86_64. The Stage 3 conclusions stand.
+
+### The QB-tilt experiment — ANSWERED, and it contradicts §7c's recommendation
+
+Now trustworthy (control arm verified above). N=300/season, 2020–2024. `delta` is added to QB replacement **in the drafting value function only**; scoring always uses true replacement levels.
+
+| delta | mean | sd | min | max | range | mean QB drafted |
+|---|---|---|---|---|---|---|
+| 0.0 | **11.47%** | 7.73 | 3.33 | 20.33 | 17.00 | 3.00 |
+| 1.0 | 11.00% | 7.07 | 3.00 | 19.67 | 16.67 | 2.66 |
+| 2.15 | 9.73% | 7.79 | 2.00 | 22.33 | 20.33 | 1.38 |
+| 3.0 | 9.67% | **4.90** | 4.00 | 17.00 | 13.00 | 1.03 |
+| 5.0 | 9.27% | **4.07** | 3.00 | 14.33 | 11.33 | 0.48 |
+| adp | 8.62% | — | 6.67 | 12.00 | 5.33 | 1.97 |
+
+**Sizing the QB bet down does not help, and §7c's recommendation to do so is not supported.** The mean *falls* monotonically as the tilt is reduced (11.47 → 9.27), while the season-to-season spread also falls (sd 7.73 → 4.07). It is an ordinary risk/return trade, with no delta that improves both.
+
+**The decisive argument is that the variance reduction is not worth buying.** You draft *once*. For a single season, the objective is expected championship probability, and `delta=0` maximises it. Between-season spread here is not diversifiable risk — it is uncertainty about which kind of season you will get, and shrinking it lowers the expectation without protecting anything you can bank.
+
+**Honest caveat: none of the mean differences are significant.** With 5 seasons the between-season SE is ~3.5pp, so 11.47 vs 9.67 is well inside noise. The *variance* ordering is the more credible signal, and it is the one that does not matter for a one-shot draft. The defensible reading is **"no evidence that shrinking the QB tilt helps; mild evidence it costs"** — so leave the value function alone.
+
+This supersedes §7c's closing recommendation, which was reasoning rather than measurement. The reasoning was plausible and the measurement disagrees; the measurement wins.
 
 `scripts/qb_tilt_sweep.py` is committed and its mechanism is verified (raising QB replacement does reduce QB count: 3.00 → 1.75 at delta=2.15 on 2024). **Its five-season results are void** and are deliberately not recorded here. Re-run it on a native ARM Python before drawing any conclusion about whether to size the QB bet down. The question from §7c remains open.
