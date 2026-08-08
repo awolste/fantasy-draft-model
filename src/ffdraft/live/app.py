@@ -2,12 +2,20 @@
 
     .venv/bin/streamlit run src/ffdraft/live/app.py
 
+**Live-only.** Precompute was built, measured, and dropped: sampling 300
+drafts found 203/248/269 distinct states at our first three picks, so the
+8 most common covered only 17.0%/11.3%/9.0% of drafts. Nearly every state
+occurs exactly once -- the space is irreducibly large at the granularity
+that changes a recommendation. ~78 minutes of precompute bought roughly one
+pick in eight; a live recommendation costs 13-36s and covers all of them.
+See HANDOFF section 11.
+
 Three things this page must always show, because each is a way the tool
 could otherwise mislead:
 
-1. **Provenance** -- cache (full budget) or live (reduced budget), and the
-   actual rollouts x sims. A number whose origin you cannot see is a number
-   you cannot calibrate.
+1. **Provenance** -- the actual rollouts x sims behind the number, the
+   elapsed time, and whether it was reused from this session. A number
+   whose origin you cannot see is a number you cannot calibrate.
 2. **Ties** -- candidates statistically indistinguishable from the leader
    are called out, not silently ranked. Presenting a strict order over a
    tie is the single most misleading thing this tool could do.
@@ -22,7 +30,6 @@ refers to teams by draft slot only.
 from __future__ import annotations
 
 import time
-from pathlib import Path
 
 import streamlit as st
 
@@ -31,17 +38,9 @@ import streamlit as st
 # imports raise "attempted relative import with no known parent package".
 from ffdraft.league import DRAFT_SLOT, N_TEAMS
 from ffdraft.live.budget import FULL_BUDGET, LIVE_BUDGET
-from ffdraft.live.cache import (
-    RecommendationCache,
-    candidates_to_rows,
-    recommend,
-    state_key,
-)
+from ffdraft.live.cache import candidates_to_rows, recommend, state_key
 from ffdraft.live.context import live_context
 from ffdraft.live.state import DraftBoard
-from ffdraft.store import CacheStaleError, fingerprint
-
-CACHE_PATH = Path("data/recommendation_cache.json")
 
 
 @st.cache_resource
@@ -51,18 +50,23 @@ def _context():
     return live_context()
 
 
-@st.cache_resource
-def _cache(_fp: str):
-    """Returns (cache, status_message). A stale or missing cache is never
-    fatal -- the live fallback exists precisely so draft day survives it."""
-    if not CACHE_PATH.exists():
-        return None, "No recommendation cache found — every pick runs live."
-    try:
-        return RecommendationCache.load(CACHE_PATH, fingerprint=_fp), None
-    except CacheStaleError as exc:
-        return None, f"Cache is stale and will not be used: {exc}"
-    except Exception as exc:  # never let a malformed cache take the tool down
-        return None, f"Cache unreadable, running live: {exc}"
+def _memoized_recommendation(key, board, ctx):
+    """Compute once per draft state, per session.
+
+    Streamlit re-executes this whole script on every interaction. Without a
+    memo, clicking Undo or touching the selectbox after a recommendation
+    appeared would re-run the simulation -- 35.7s at our first pick, on the
+    clock. Keyed by `state_key`, so a genuinely new board still costs
+    compute and a rerun at an unchanged board is instant.
+    """
+    memo = st.session_state.setdefault("rec_memo", {})
+    if key in memo:
+        return memo[key], True
+    t0 = time.perf_counter()
+    with st.spinner(f"Simulating ({LIVE_BUDGET.label})…"):
+        rows = candidates_to_rows(recommend(board.to_draft_state(), ctx, LIVE_BUDGET))
+    memo[key] = (rows, time.perf_counter() - t0)
+    return memo[key], False
 
 
 def main() -> None:
@@ -75,10 +79,6 @@ def main() -> None:
     )
 
     ctx = _context()
-    fp = fingerprint(ctx.rankings, ctx.adp_table)
-    cache, cache_note = _cache(fp)
-    if cache_note:
-        st.warning(cache_note)
 
     if "board" not in st.session_state:
         st.session_state.board = DraftBoard()
@@ -151,21 +151,12 @@ def main() -> None:
         key = state_key(
             board.next_overall_pick, board.our_roster_counts, board.drafted_ids, ctx.pool
         )
-        rows = cache.get(key) if cache is not None else None
-
-        if rows is not None:
-            st.success(
-                f"**cache hit** — full budget ({FULL_BUDGET.label}), "
-                f"precomputed. Probabilities are ±~0.5pp for a board sharing this key."
-            )
-        else:
-            t0 = time.perf_counter()
-            with st.spinner(f"Cache miss — simulating live ({LIVE_BUDGET.label})…"):
-                rows = candidates_to_rows(recommend(board.to_draft_state(), ctx, LIVE_BUDGET))
-            st.warning(
-                f"**live** — reduced budget ({LIVE_BUDGET.label}), "
-                f"{time.perf_counter() - t0:.1f}s. Wider error bars than a cached pick."
-            )
+        (rows, elapsed), from_memo = _memoized_recommendation(key, board, ctx)
+        st.caption(
+            f"**live** · budget {LIVE_BUDGET.label} · {elapsed:.1f}s"
+            + (" · reused from this session (board unchanged)" if from_memo else "")
+            + f" · full budget for reference is {FULL_BUDGET.label}"
+        )
 
         tied = [r for r in rows if r["indistinguishable_from_leader"]]
         if len(tied) > 1:

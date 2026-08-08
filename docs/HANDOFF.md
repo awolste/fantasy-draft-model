@@ -34,7 +34,7 @@ Full K and DST scoring rules are in the spec. Two bands are **neutral, not missi
 | 1 | Data foundation | **Complete**, merged to `main` |
 | 2 | Player + season model | **Complete**, merged to `main` |
 | 3 | Opponent model + optimizer | **Complete (7 of 7)**, merged to `main` |
-| 4 | Live draft assistant | Not started, no plan written |
+| 4 | Live draft assistant | **Complete** (live-only; precompute measured and dropped, §11) |
 
 **Stage 3 is merged and pushed to `origin/main`. 362 tests pass in ~7:40** on the native arm64 venv (was ~11:30 under Rosetta). See §9/§10 for why the runtime was replaced — that work is done, and open item 8 is closed.
 
@@ -123,7 +123,7 @@ Since commit `2b845cc`, lineups are chosen on **projected means** and scored on 
 
 3. **QB=3 and K=2 are cap-bound in every rollout.** The value function still ranks a third QB and second kicker above better alternatives; a policy guard (`MAX_EXTRA_BENCH_NO_FLEX`) is the only thing stopping it. That is masking, not fixing, and costs ~2 roster spots versus opponents' 1.7 QB / 1.2 K. `value.py` has been through three fix rounds; a fourth patch is probably the wrong move — consider whether greedy marginal value is the right policy at all.
 4. **Between-rollout variance appears state-dependent and is unresolved.** Measured 3.50pp at pick 8 (n=50) but 5.97pp in an independent 10-seed check at a different state. The staleness guard catches drift over time but will not tell you the allocation is too tight at some other draft state.
-5. **A recommendation honestly costs ~5.6 minutes** for 15 candidates (N=65 rollouts × M=500 sims). **This is too slow for a live draft**, where you have ~90 seconds. Stage 4 needs a decision: pre-compute likely draft states, cut rollouts and accept wider error bars, or restrict to a pre-selected shortlist. This is a usage decision, not an engineering one.
+5. ~~A recommendation costs ~5.6 minutes, too slow for a live draft.~~ **RESOLVED in Stage 4 (§11).** Full budget is now ~197s on native ARM, and the live tool uses a measured reduced budget (12×16×300) costing 35.7s at our worst pick and 13.1s at our last. Precompute was built and dropped after measuring a 9–17% hit rate.
 6. **Test suite takes ~12 minutes**, roughly quadrupled because the pick-8/pick-13 real-data tests use full production budgets. Consider pinning a smaller explicit budget in those two tests.
 7. **`sources/nflverse.py` imports `models/kicking.py`** — a Stage 1 → Stage 2 layering inversion. Cheap to fix by moving `kicking.py` beside `scoring.py`.
 8. **Python runs under Rosetta x86-64 emulation**, not native ARM, and this still causes intermittent native crashes. `polars[rtcompat]` (§9) reduced but did **not eliminate** them: after installing it, a full `pytest` run died with a native fault dump, and two subsequent identical runs passed 362/362. `pytest-randomly` is not installed, so this is not test-order dependence — it is plain intermittency, roughly 1 in 3 observed. **Switching to a native ARM Python is now the top infrastructure priority**, not a nice-to-have: it removes Rosetta from the picture instead of patching around it. Until then, treat a single green suite as weak evidence and re-run before trusting a release. Never set `POLARS_SKIP_CPU_CHECK=1`.
@@ -664,3 +664,56 @@ Now trustworthy (control arm verified above). N=300/season, 2020–2024. `delta`
 This supersedes §7c's closing recommendation, which was reasoning rather than measurement. The reasoning was plausible and the measurement disagrees; the measurement wins.
 
 `scripts/qb_tilt_sweep.py` is committed and its mechanism is verified (raising QB replacement does reduce QB count: 3.00 → 1.75 at delta=2.15 on 2024). **Its five-season results are void** and are deliberately not recorded here. Re-run it on a native ARM Python before drawing any conclusion about whether to size the QB bet down. The question from §7c remains open.
+
+## 11. Stage 4 — the live assistant, and why precompute was dropped
+
+**Built, measured, simplified.** The owner chose "precompute + live fallback" on the reasonable assumption that precompute would cover the common draft states. **It does not, and the architecture was cut back to live-only after measuring it.**
+
+### The measurement that killed precompute
+
+`scripts/build_recommendation_cache.py` (kept at `docs/superpowers/archive/build_recommendation_cache.py.unused`) samples reachable states from the opponent model. Sampling 300 drafts:
+
+| our round | distinct states seen | top 8 states cover |
+|---|---|---|
+| 1 | 203 | **17.0%** of drafts |
+| 2 | 248 | **11.3%** |
+| 3 | 269 | **9.0%** |
+
+**Roughly 195 of 203 round-1 states occur exactly once.** The state space is nearly as large as the sample, and this is not a tuning problem: at pick 8, seven players are gone from a realistic top ~15, which is C(15,7) ≈ 6,400 states before later rounds multiply it. Coarsening the key does not rescue it either — *which* elite players remain is precisely what changes the recommendation, so a key coarse enough to collapse the space is too coarse to be correct.
+
+Cost/benefit: ~78 minutes of precompute bought about **one pick in eight**. A live recommendation costs 13–36s and covers all of them.
+
+### Live-only is comfortable on the clock — measured, not asserted
+
+`LIVE_BUDGET` = **12×16×300**, measured on the native arm64 venv against the live 2026 pool:
+
+| our pick | rounds left | elapsed | leader SE |
+|---|---|---|---|
+| 8 | 18 | **35.7s** | 0.92pp |
+| 13 | 17 | 34.1s | 0.79pp |
+| 33 | 15 | 30.4s | 0.50pp |
+| 88 | 10 | 21.5s | 0.48pp |
+| 148 | 4 | 13.1s | 0.46pp |
+
+Cost scales with **rounds left to simulate**, so pick 8 is the worst case and it falls steadily. Against a ~90s clock that leaves ~54s to think at the worst pick.
+
+Two things make this better than the raw number. **Pick entry does not compete with your clock** — opponents' picks are entered during *their* turns, so at most one is outstanding when yours starts. And **precision improves as picks get cheaper** (SE 0.92pp → 0.46pp), because fewer remaining rounds means less variance to simulate.
+
+Why not the 15×20×400 budget that also fits under 60s: the 90s clock must also cover entry, reading, and deciding. 35.6s leaves ~54s of human time against ~30s. The precision surrendered is 0.25pp of SE against the model's own 4.15pp between-season SE (§10) — a bad trade.
+
+### The rerun hazard, and the memo
+
+Streamlit re-executes the entire script on every interaction. The first version called `recommend()` directly in the render path, so clicking Undo or touching the selectbox after a recommendation appeared would **re-run the simulation on the clock**. `app._memoized_recommendation` keys results by `state_key` in `st.session_state`: unchanged board → instant, genuinely new board → recompute. Pinned by `tests/test_live_app_paths.py::test_recommendation_is_memoized_by_state_key_not_recomputed`, including that an *undo* returns to a memo hit.
+
+### What survives from the precompute work
+
+- `live/cache.py` keeps `state_key`, `recommend` (still the single `recommend_pick` call site), and `candidates_to_rows`. `RecommendationCache` remains but is unused by the app.
+- **`TOP_N_FOR_KEY = 60` is validated** (`scripts/validate_cache_key.py`): boards sharing a key produce the same leader 3/3, probability deltas 0.82/0.49/0.08pp consistent with Monte-Carlo noise at the full budget's 0.45pp SE. Still load-bearing, because the memo keys on it.
+
+### Draft-day runbook
+
+1. Re-run the ingest so `rankings_2026` / `adp_2026` are current.
+2. `.venv/bin/streamlit run src/ffdraft/live/app.py`
+3. Load the page **before** the draft starts — fitting the context takes a few seconds and is cached per session.
+4. Enter every pick as it happens, including opponents'. Undo fixes a mis-entry.
+5. At our pick the recommendation computes automatically. Read the tie callout before the ranking: candidates flagged indistinguishable from the leader are equivalent, and the ordering among them is noise.

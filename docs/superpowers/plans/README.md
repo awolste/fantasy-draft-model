@@ -38,7 +38,7 @@ Measured, not assumed. Do not re-derive these; do check them if a Stage 3 result
 | 1 | [`2026-08-02-data-foundation.md`](2026-08-02-data-foundation.md) | Every input pulled, ID-matched, scored under league rules, validated | **Complete** — 97 tests, 9 datasets |
 | 2 | [`2026-08-02-player-and-season-model.md`](2026-08-02-player-and-season-model.md) | Weekly points distributions per player; season simulator taking 10 rosters to a champion | **Complete** — 210 tests, 1,000 seasons in 0.17s |
 | 3 | [`2026-08-03-opponent-model-and-optimizer.md`](2026-08-03-opponent-model-and-optimizer.md) | Opponent draft model, draft rollout, recommender, backtest, and the 0RB vs. Hero RB answer | **Complete** — answer: structure does not matter (HANDOFF §7c) |
-| 4 | [`2026-08-04-live-assistant.md`](2026-08-04-live-assistant.md) | Streamlit draft-day tool: manual type-ahead entry, precomputed recommendation cache + live fallback | **Plan written, ready to execute** |
+| 4 | [`2026-08-04-live-assistant.md`](2026-08-04-live-assistant.md) | Streamlit draft-day tool: manual type-ahead entry, live recommendations | **Complete** — precompute built, measured (9-17% hit rate) and dropped; see HANDOFF §11 |
 
 **Stage 4's August-2026 gate is now satisfied** (today is 2026-08-04). Note the original rationale was that ESPN's 2026 endpoints would be live — but the owner has since chosen **manual pick entry, no ESPN polling**, so that dependency no longer applies. See the Stage 4 spec for why.
 

@@ -131,3 +131,19 @@ directory and must never be committed. If you need to derive a test fixture
 from an ESPN response, run it through `scripts/sanitize_espn_fixture.py`
 first — it replaces every identifier with a deterministic fake while
 preserving response shape, pick counts, and internal consistency.
+
+## Draft day
+
+```bash
+.venv/bin/python scripts/ingest_all.py     # refresh rankings_2026 / adp_2026 first
+.venv/bin/streamlit run src/ffdraft/live/app.py
+```
+
+Open the page before the draft starts (fitting the model takes a few seconds,
+then it is cached for the session). Enter every pick as it happens, including
+opponents'. At your pick the recommendation computes automatically — 13–36s
+depending on how many rounds remain.
+
+Read the tie callout before the ranking: candidates flagged indistinguishable
+from the leader are equivalent, and the order among them is noise. See
+`docs/HANDOFF.md` §11.

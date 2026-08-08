@@ -62,3 +62,38 @@ def test_app_state_key_matches_what_the_board_reports():
     )
     assert key.overall_pick == state.next_overall_pick
     assert set(board.drafted_ids) == set(state.drafted_ids)
+
+
+def test_recommendation_is_memoized_by_state_key_not_recomputed():
+    """Streamlit re-executes the script on every interaction. Without a memo,
+    clicking Undo after a recommendation appeared would re-run the simulation
+    -- 35.7s at our first pick, on the clock.
+
+    This pins the memo's contract at the level `app._memoized_recommendation`
+    relies on: identical board -> identical key -> reusable entry; changed
+    board -> new key -> recompute.
+    """
+    ctx = live_context()
+    board = _board_at_our_first_pick(ctx)
+
+    def key_for(b):
+        return state_key(b.next_overall_pick, b.our_roster_counts, b.drafted_ids, ctx.pool)
+
+    memo: dict = {}
+    k1 = key_for(board)
+    memo[k1] = candidates_to_rows(recommend(board.to_draft_state(), ctx, TINY))
+
+    # A rerun with the board untouched must hit the memo.
+    assert key_for(board) in memo
+
+    # Recording a pick must miss it -- a stale recommendation for a changed
+    # board is worse than a slow one.
+    board.record(
+        next(p for p in ctx.pool if p not in board.drafted_ids),
+        "RB",
+    )
+    assert key_for(board) not in memo
+
+    # Undoing back to the original board must hit again.
+    board.undo()
+    assert key_for(board) in memo
