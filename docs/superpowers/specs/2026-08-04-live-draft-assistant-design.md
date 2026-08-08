@@ -69,7 +69,18 @@ with `N = 60`. **Rationale:** a recommendation depends on which *good* players a
 
 This is an approximation and is labelled as one. Two guards:
 
-1. `N = 60` is validated empirically (Task 6): sample state pairs that share a key but differ below the top 60, run both at full budget, and confirm the top recommendation agrees. If it does not, raise `N` or abandon precompute for that round.
+1. `N = 60` is **validated empirically and the evidence is recorded** (`scripts/validate_cache_key.py`, live 2026 context, overall pick 8, full budget). Three boards constructed to share a key but differ below the cutoff:
+
+```
+keys held: 3/3   leader agreement: 3/3
+championship-probability delta: 0.82pp, 0.49pp, 0.08pp   (base leader p=19.78%)
+```
+
+The leader is unchanged in every case. The probability deltas are consistent with plain Monte-Carlo noise rather than a key artifact: full budget reports SE 0.45pp, so two independent runs differ by ~0.64pp typically, and 0.82pp is ~1.3 sigma of that.
+
+**A caveat worth keeping:** a cached probability can be ~0.5-0.8pp off for a *different* board sharing the same key. That does not change which player is recommended, which is what the tool is for, but it means the displayed percentage should not be read to two decimal places.
+
+An earlier version of this validator was broken in an instructive way: it perturbed a player from *inside* the top 60, so the key moved on every trial, and it reported "OK -- 3/3 agreement" while its own output said `same_key=False`. It validated nothing and said the opposite. The script now exits non-zero as INVALID if any key moves.
 2. The UI always shows whether an answer came from cache or live, so a suspicious recommendation can be re-run live at any time.
 
 ### 4.3 Which states to precompute
