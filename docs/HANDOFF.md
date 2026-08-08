@@ -575,3 +575,51 @@ The venv Python is **x86_64 running under Rosetta on an Apple M1 Pro**. Polars' 
 **How much to distrust earlier numbers.** The failure mode here is a loud crash rather than quiet bad arithmetic, and the headline results replicated independently — the multi-season gate came out at +2.20pp through one scoring implementation and +2.45pp through a separate one, which corrupted inputs would not reliably produce. Direct evidence: the structure study's 2020 row from the *unsound* run (0RB 15.50 / hero 12.00 / 2RB 15.75 / free 12.25 / adp 7.00) versus the sound re-run (16.00 / 12.50 / 17.00 / 12.75 / 6.75) — differences of 0.25–1.00pp, comfortably inside Monte-Carlo noise at N=400. So the earlier conclusions look sound; they simply could not be *demonstrated* sound, which is why §7c was re-run before being reported.
 
 **Still worth doing:** switch to a native ARM Python (open item 8). `rtcompat` makes the current setup correct; a native build would make it correct *and* substantially faster, which matters given the suite already takes ~12 minutes.
+
+## 10. The runtime can produce silently WRONG NUMBERS, not just crashes
+
+**Found 2026-08-04, immediately after §9. This is the most serious open issue in the project and it outranks every modelling question below it.**
+
+§9 recorded that Rosetta-hosted Polars crashes intermittently, and that `polars[rtcompat]` was installed as a mitigation. It then emerged that (a) rtcompat does **not** eliminate the crashes, and (b) worse, the same instability can produce **plausible, non-crashing, wrong results**.
+
+### The evidence
+
+`scripts/qb_tilt_sweep.py` was run over five holdout seasons in one process. Its `delta=0` contender is by construction identical to the plain engine — it adds 0.0 to QB replacement — so it must reproduce `engine_free`. Across seasons it did not:
+
+| season | engine (backtest) | engine_free (study) | qb_tilt delta=0, 5-season run |
+|---|---|---|---|
+| 2020 | 12.00% | 12.75% | 11.00% ✓ |
+| 2021 | 18.75% | 19.25% | **5.33%** ✗ |
+| 2022 | 21.50% | 21.75% | **8.33%** ✗ |
+| 2023 | 4.00% | 4.00% | 2.33% ✓ |
+| 2024 | 2.50% | 2.25% | 2.67% ✓ |
+
+Seasons 2 and 3 were wrong by 14pp and 13pp — roughly 6 sigma. The code was then cleared of blame, in this order:
+
+1. **The drafts are byte-identical.** `delta=0` vs `engine_free`, 2021, seeds 1 and 2: all 180 picks identical, ours and every opponent's. The policy path is provably equivalent.
+2. **The rate is identical in a clean process.** Both score **16.67%** on 2021 at N=150, in the same interpreter.
+3. **A fresh 2-season re-run is correct.** Same script, same seeds: 2020 → 12.00%, 2021 → 16.67%.
+
+So the identical code produced 5.33% once and ~17% every other time. **It is nondeterministic, and it is not test-order or script logic.**
+
+A corroborating detail worth keeping: in the bad run, mean QB count per roster for `delta=0` was **3.95**; in the good run it is **3.00**. The *drafts themselves* differed, which means the corruption hit the fitted inputs (rank curves / replacement / tier shapes — the Polars-heavy fitting step), not the scoring. That is consistent with data-level corruption during model fitting.
+
+### What this means
+
+This is precisely the failure mode §8 says is the project's main risk — confident, plausible, wrong output with no error raised — except the source is the *runtime*, not the code, so no amount of code review or validation logic will catch it.
+
+**Switching to a native ARM Python is no longer a performance nice-to-have. It is a correctness requirement and the top priority.** `rtcompat` is a partial mitigation only.
+
+### How much to distrust existing results
+
+Do not panic-discard everything; do check before quoting. The load-bearing results were each measured **more than once through independent code paths**, which is what makes them believable:
+
+- **Multi-season gate:** +2.20pp via the standalone ex-ante diagnostic and +2.45pp via production `run_backtest` — separate scoring implementations, separate runs.
+- **Structure study:** the 2020 row matched to within 0.25–1.00pp between an unsound run and a sound re-run.
+- **Hindsight effect (5.75pp):** measured at N=400 and consistent with the independent per-season pattern in test 8.
+
+**Rule going forward: no single-run number is trustworthy on this hardware.** Anything that matters must be replicated in a separate process, ideally by a different code path, and a disagreement between two runs of identical code should be treated as a runtime fault until proven otherwise — not explained away.
+
+### Status of the QB-tilt experiment
+
+`scripts/qb_tilt_sweep.py` is committed and its mechanism is verified (raising QB replacement does reduce QB count: 3.00 → 1.75 at delta=2.15 on 2024). **Its five-season results are void** and are deliberately not recorded here. Re-run it on a native ARM Python before drawing any conclusion about whether to size the QB bet down. The question from §7c remains open.
