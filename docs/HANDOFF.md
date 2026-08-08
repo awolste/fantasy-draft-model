@@ -622,7 +622,7 @@ Do not panic-discard everything; do check before quoting. The load-bearing resul
 
 ### RESOLVED 2026-08-04: native ARM Python installed, corruption confirmed and fixed
 
-`uv python install cpython-3.11-macos-aarch64-none` (no sudo needed), venv at **`.venv-arm`**. The old x86_64 `.venv` is left in place as a fallback but **should not be used**. Note two dead ends: `/opt/homebrew` exists but has no `brew` binary, and `uv` is itself an x86_64 binary so `uv python list` only advertises x86_64 — pass the explicit `-macos-aarch64-none` key.
+`uv python install cpython-3.11-macos-aarch64-none` (no sudo needed). The x86_64 venv has been **deleted**; **`.venv` is now native arm64**, so every existing `.venv/bin/...` reference still works. It was rebuilt from scratch rather than renamed — renaming a venv leaves stale absolute paths in `pyvenv.cfg` and every console-script shebang. **`.gitignore` now uses `.venv*/`, not `.venv/`**: a venv created as `.venv-arm` did not match the old pattern and 6,523 files (587MB) were committed by a `git add -A` before being caught and amended out pre-push. Prefer explicit `git add <paths>`. Note two dead ends: `/opt/homebrew` exists but has no `brew` binary, and `uv` is itself an x86_64 binary so `uv python list` only advertises x86_64 — pass the explicit `-macos-aarch64-none` key.
 
 Verified native: `platform.machine() == 'arm64'`, Polars 1.43.2 imports clean under `warnings.simplefilter('error')`, and only the standard `polars-runtime-32` is installed — the `rtcompat` shim is gone, because there is nothing left to compensate for.
 
