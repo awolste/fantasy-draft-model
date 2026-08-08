@@ -11,6 +11,8 @@ Personal-data rule: never reads `.env` or `data/manager_labels.csv`.
 
 from __future__ import annotations
 
+import argparse
+
 from ffdraft.backtest import fit_holdout_context
 
 
@@ -58,10 +60,6 @@ def main() -> None:
         )
 
 
-if __name__ == "__main__":
-    main()
-
-
 def with_alternate_replacement() -> None:
     """Re-rank the same pool using 2024's REALIZED replacement levels
     (measured by scripts/validate_replacement_2024.py, top_k=5) instead of
@@ -98,3 +96,16 @@ def with_alternate_replacement() -> None:
         print(f"  VOR, fitted <=2023 repl : {shares(ctx.replacement_means, n)}")
         print(f"  VOR, realized 2024 repl : {shares(realized_2024, n)}")
         print(f"  ADP                     : {adp_shares(n)}")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--alt-replacement",
+        action="store_true",
+        help="also re-rank using 2024's REALIZED replacement levels (deliberate leakage; diagnostic only)",
+    )
+    args = parser.parse_args()
+    main()
+    if args.alt_replacement:
+        with_alternate_replacement()
