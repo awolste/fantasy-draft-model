@@ -87,6 +87,7 @@ from ..league import (
 )
 from ..models.availability import PlayerAvailability, sample_availability_batch
 from ..models.base import WeeklyDistribution
+from .lineup import _validate_replacement_means
 
 # ---------------------------------------------------------------------------
 # Roster representation
@@ -283,19 +284,6 @@ def solve_team_lineups_vectorized(
         total = total + flex_total
 
     return total
-
-
-def _validate_replacement_means(
-    replacement_means: Mapping[str, float], starters: Mapping[str, int], flex_eligible: frozenset[str]
-) -> None:
-    needed = {pos for pos, count in starters.items() if pos != "FLEX" and count > 0}
-    needed |= set(flex_eligible)
-    missing = needed - set(replacement_means)
-    if missing:
-        raise ValueError(
-            f"replacement_means is missing entries for {sorted(missing)} -- "
-            "every dedicated position (and every FLEX-eligible position) needs a value."
-        )
 
 
 # ---------------------------------------------------------------------------

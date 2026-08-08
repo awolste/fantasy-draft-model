@@ -3,42 +3,12 @@ import polars as pl
 import pytest
 
 from ffdraft.models.distribution import (
-    STARTER_COHORT_TOP_N,
-    RankCurve,
     TierShape,
     ZeroInflatedGammaDistribution,
     anchor_tier_shape,
     build_player_pool,
     excluded_players,
-    fit_rank_curves,
-    fit_tier_shapes,
-    modeled_starter_quantile_ratios,
-    n_tiers,
-    observed_starter_quantiles,
-    tier_for_rank,
 )
-from ffdraft.store import exists, read
-
-# ---------------------------------------------------------------------------
-# tier_for_rank / n_tiers
-
-
-def test_tier_for_rank_wr_boundaries():
-    assert tier_for_rank("WR", 1) == 1
-    assert tier_for_rank("WR", 12) == 1
-    assert tier_for_rank("WR", 13) == 2
-    assert tier_for_rank("WR", 24) == 2
-    assert tier_for_rank("WR", 25) == 3
-    assert tier_for_rank("WR", 36) == 3
-    assert tier_for_rank("WR", 37) == 4
-    assert tier_for_rank("WR", 500) == 4
-
-
-def test_n_tiers_matches_breaks_plus_one():
-    assert n_tiers("QB") == 3
-    assert n_tiers("RB") == 4
-    assert n_tiers("K") == 2
-
 
 # ---------------------------------------------------------------------------
 # ZeroInflatedGammaDistribution + anchor_tier_shape
@@ -150,27 +120,12 @@ def test_anchor_raises_when_tier_has_no_positive_mass():
 
 
 # ---------------------------------------------------------------------------
-# fit_tier_shapes / fit_rank_curves on synthetic data
+# build_player_pool: exclusion handling
 
 
 def _synthetic_weekly_stats(rng: np.random.Generator, n_players: int = 45) -> pl.DataFrame:
-    """Small but valid `weekly_stats`-shaped frame for one position (WR),
-    two rank tiers, enough seasons/players/weeks to clear the fit
-    functions' internal minimum-sample thresholds.
-
-    Deliberately covers more players (default 45) than
-    `_synthetic_adp_history` does (30) -- mirroring the real project, where
-    plenty of ranked/rostered players never appear in historical ADP data
-    at all, which is exactly the range `fit_rank_curves`'s deep-tail piece
-    has to cover using finish rank instead.
-    """
     rows = []
     for season in range(2020, 2024):
-        # A smoothly decreasing true mean by rank (like the real
-        # rank->points relationship), so the curve fit has an actual decay
-        # to recover rather than a discontinuous step. Tier 1 (rank 1-12)
-        # is also less zero-inflated than tier 2, to exercise the
-        # tier-shape fit's p_zero split.
         for player_idx in range(n_players):
             player_id = f"WR{player_idx}"
             base_mean = 20.0 / (1.0 + player_idx * 0.15)
@@ -208,113 +163,6 @@ def _synthetic_adp_history(rng: np.random.Generator, n_players: int = 30) -> pl.
     return pl.DataFrame(rows)
 
 
-def test_fit_tier_shapes_recovers_lower_zero_rate_in_top_tier(monkeypatch):
-    import ffdraft.models.distribution as dist_mod
-
-    monkeypatch.setattr(dist_mod, "TIER_BREAKS", {"WR": (12,)})
-    rng = np.random.default_rng(1)
-    weekly = _synthetic_weekly_stats(rng)
-    table = fit_tier_shapes(weekly)
-    rows = {r["tier"]: r for r in table.to_dicts()}
-    assert rows[1]["p_zero"] < rows[2]["p_zero"]
-    assert rows[1]["n_weeks"] > 0 and rows[2]["n_weeks"] > 0
-
-
-def test_fit_rank_curves_is_decreasing_in_rank(monkeypatch):
-    import ffdraft.models.distribution as dist_mod
-
-    monkeypatch.setattr(dist_mod, "TIER_BREAKS", {"WR": (12,)})
-    rng = np.random.default_rng(2)
-    weekly = _synthetic_weekly_stats(rng)
-    adp_history = _synthetic_adp_history(rng)
-    adp_table, deep_table = fit_rank_curves(adp_history, weekly)
-    row = adp_table.filter(pl.col("position") == "WR").to_dicts()[0]
-    knots = deep_table.filter(pl.col("position") == "WR").sort("knot_rank")
-    curve = RankCurve(
-        position="WR",
-        a=row["a"],
-        b=row["b"],
-        c=row["c"],
-        n_players=row["n_players"],
-        boundary_rank=row["boundary_rank"],
-        deep_knot_ranks=tuple(knots["knot_rank"].to_list()),
-        deep_knot_ppg=tuple(knots["knot_ppg"].to_list()),
-        max_supported_rank=row["max_supported_rank"],
-    )
-    # decreasing within the ADP-fit range (rank 1-30) ...
-    assert curve.mean_for_rank(1) > curve.mean_for_rank(12) > curve.mean_for_rank(30)
-    # ... and continues decreasing (or holding) into the deep tail (31-45),
-    # which is built from finish rank rather than the ADP power law.
-    assert curve.boundary_rank == 30
-    assert curve.max_supported_rank >= 45
-    assert curve.mean_for_rank(30) >= curve.mean_for_rank(45)
-
-
-def test_deep_tail_is_continuous_at_the_adp_boundary(monkeypatch):
-    """The whole point of rescaling the deep piece: no jump at the seam."""
-    import ffdraft.models.distribution as dist_mod
-
-    monkeypatch.setattr(dist_mod, "TIER_BREAKS", {"WR": (12,)})
-    rng = np.random.default_rng(2)
-    weekly = _synthetic_weekly_stats(rng)
-    adp_history = _synthetic_adp_history(rng)
-    adp_table, deep_table = fit_rank_curves(adp_history, weekly)
-    row = adp_table.filter(pl.col("position") == "WR").to_dicts()[0]
-    knots = deep_table.filter(pl.col("position") == "WR").sort("knot_rank")
-    curve = RankCurve(
-        position="WR",
-        a=row["a"],
-        b=row["b"],
-        c=row["c"],
-        n_players=row["n_players"],
-        boundary_rank=row["boundary_rank"],
-        deep_knot_ranks=tuple(knots["knot_rank"].to_list()),
-        deep_knot_ppg=tuple(knots["knot_ppg"].to_list()),
-        max_supported_rank=row["max_supported_rank"],
-    )
-    just_inside = curve.mean_for_rank(curve.boundary_rank)
-    just_outside = curve.mean_for_rank(curve.boundary_rank + 1)
-    assert abs(just_inside - just_outside) / just_inside < 0.15
-
-
-def test_rank_curve_raises_beyond_max_supported_rank():
-    curve = RankCurve(
-        position="WR",
-        a=20.0,
-        b=0.3,
-        c=1.0,
-        n_players=100,
-        boundary_rank=30,
-        deep_knot_ranks=(35.0, 45.0),
-        deep_knot_ppg=(5.0, 2.0),
-        max_supported_rank=45,
-    )
-    curve.mean_for_rank(45)  # does not raise
-    with pytest.raises(ValueError, match="exceeds this curve's fitted range"):
-        curve.mean_for_rank(46)
-
-
-def test_rank_curve_never_projects_below_the_floor():
-    """Even where the deep-tail data trends toward zero, a real player
-    doesn't project to exactly 0 ppg."""
-    curve = RankCurve(
-        position="WR",
-        a=20.0,
-        b=0.3,
-        c=1.0,
-        n_players=100,
-        boundary_rank=30,
-        deep_knot_ranks=(35.0, 45.0),
-        deep_knot_ppg=(0.2, 0.0),
-        max_supported_rank=45,
-    )
-    assert curve.mean_for_rank(45) >= 0.5
-
-
-# ---------------------------------------------------------------------------
-# build_player_pool: exclusion handling
-
-
 def _tiny_crosswalk() -> pl.DataFrame:
     return pl.DataFrame(
         {
@@ -329,13 +177,20 @@ def _tiny_crosswalk() -> pl.DataFrame:
 
 def test_unmatched_skill_player_is_excluded_not_defaulted(monkeypatch, tmp_path):
     import ffdraft.store as store_mod
-    import ffdraft.models.distribution as dist_mod
+    import ffdraft.models.tier_shape as tier_shape_mod
+    import ffdraft.models.rank_curve as rank_curve_mod
 
     # build_player_pool(force_refit=True) persists fitted params via
     # ffdraft.store.write -- redirect DATA_DIR so this test can never touch
     # the real, gitignored data/distribution_*.parquet files.
     monkeypatch.setattr(store_mod, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(dist_mod, "TIER_BREAKS", {"WR": (12,)})
+    # Restrict both fit paths' position loops to WR -- fit_tier_shapes and
+    # fit_rank_curves each hold their own module-level TIER_BREAKS reference
+    # (imported once at module load), so both must be patched to keep
+    # build_player_pool's two internal fits consistent with each other and
+    # with this test's WR-only synthetic data.
+    monkeypatch.setattr(tier_shape_mod, "TIER_BREAKS", {"WR": (12,)})
+    monkeypatch.setattr(rank_curve_mod, "TIER_BREAKS", {"WR": (12,)})
     rng = np.random.default_rng(3)
     weekly = _synthetic_weekly_stats(rng)
     adp_history = _synthetic_adp_history(rng)
@@ -367,10 +222,12 @@ def test_kicker_bypasses_crosswalk_entirely(monkeypatch, tmp_path):
     """Kickers must be assignable even when the crosswalk has zero coverage
     for them (matching this project's real-world PK-vs-K mismatch)."""
     import ffdraft.store as store_mod
-    import ffdraft.models.distribution as dist_mod
+    import ffdraft.models.tier_shape as tier_shape_mod
+    import ffdraft.models.rank_curve as rank_curve_mod
 
     monkeypatch.setattr(store_mod, "DATA_DIR", tmp_path)
-    monkeypatch.setattr(dist_mod, "TIER_BREAKS", {"K": (12,)})
+    monkeypatch.setattr(tier_shape_mod, "TIER_BREAKS", {"K": (12,)})
+    monkeypatch.setattr(rank_curve_mod, "TIER_BREAKS", {"K": (12,)})
     rng = np.random.default_rng(4)
     # 40 K player-seasons but ADP only covers the first 20 -- like the real
     # kicker pool, where most rostered kickers never appear in historical
@@ -411,141 +268,3 @@ def test_kicker_bypasses_crosswalk_entirely(monkeypatch, tmp_path):
     )
     assert len(pool) == 2
     assert all(p.position == "K" for p in pool.values())
-
-
-# ---------------------------------------------------------------------------
-# Calibration: modeled tail behavior vs the real starter cohort.
-#
-# This is the acceptance criterion the plan actually specified ("judged
-# primarily on upper-tail fit") and it was previously never enforced by a
-# test -- a hand-run diagnostic reported a badly-inflated ratio (2.44
-# modeled vs 1.54 observed for QB) that no test caught. This test would
-# have failed loudly on that version: the gap was +58%, several times over
-# even the loosest tolerance below.
-#
-# Which quantile is the fitted target vs an independent check matters here:
-# `_fit_gamma_shape` solves the Gamma shape to match the empirical
-# **p90**/median ratio directly (see its docstring). So a p90 assertion
-# alone is close to circular -- it mostly re-confirms that rank-anchoring,
-# zero-inflation, and tiering compose without distorting the ratio the fit
-# already targeted, which is real coverage but can't catch a wrong tail
-# *family*. p95 and p99 are NOT fit targets: nothing in the fitting
-# procedure sees them, so if Gamma were the wrong family, or the tail
-# diverged past what a single quantile match can fix, these would drift
-# while p90 stayed locked -- and only these two would catch it.
-#
-# Uses real `data/weekly_stats.parquet`/`rankings_2026`/`adp_history` (not
-# synthetic fixtures) because the whole point is checking the fit against
-# actual NFL history -- skipped rather than failed when that data hasn't
-# been ingested, consistent with this project's data/ being gitignored.
-#
-# Tolerances are chosen from the *observed* side's sampling noise, which is
-# the binding constraint (the modeled side is drawn from a closed-form
-# distribution at 500k samples/position and its own MC noise is
-# negligible by comparison). A 2000-resample bootstrap of
-# `observed_starter_quantiles`'s ratio90/95/99 over the real starter-cohort
-# data gave these standard errors (as a fraction of the ratio):
-#   p90: QB/RB/WR ~2%, TE/K ~3%   -> tightest, least noisy
-#   p95: ~2-3% for QB/RB/WR, ~3%  for TE/K
-#   p99: QB ~2.9%, K ~3.3%, WR ~3.1%, RB ~4.6%, TE ~5.5% (worst -- see below)
-# p99 is noisiest because it's estimated from very few order statistics:
-# with only 900-1900 starter-weeks per position, the top 1% is ~9-19 weeks
-# (TE has the fewest, 930 weeks -> ~9.3 informing p99, hence its 5.5% CV).
-#
-# Tolerance = roughly 6x the worst observed-side CV in that quantile's
-# group, which is comfortably tight (an actual family misspecification
-# should produce an error many times larger than sampling noise -- the
-# pre-fix bug was ~20-30x a typical CV) while not flagging normal
-# small-sample variation in a legitimately correct model:
-CALIBRATION_TOLERANCE = {
-    "ratio90": 0.15,  # ~2-3% observed CV -> ~6x headroom; also the fitted target
-    "ratio95": 0.20,  # ~2-3% observed CV -> ~7-10x headroom; independent check
-    "ratio99": 0.35,  # up to 5.5% observed CV (TE) -> ~6x headroom; independent check
-}
-
-_HAS_REAL_DATA = exists("weekly_stats") and exists("rankings_2026") and exists("adp_history")
-
-
-@pytest.mark.skipif(not _HAS_REAL_DATA, reason="requires ingested data/ (run scripts/ingest_all.py)")
-def test_modeled_tail_matches_observed_starter_cohort():
-    weekly = read("weekly_stats")
-    rankings = read("rankings_2026")
-    adp_history = read("adp_history")
-
-    observed = observed_starter_quantiles(weekly)
-    pool = build_player_pool(rankings=rankings, weekly=weekly, adp_history=adp_history)
-    modeled = modeled_starter_quantile_ratios(pool)
-
-    observed_by_pos = {r["position"]: r for r in observed.to_dicts()}
-    modeled_by_pos = {r["position"]: r for r in modeled.to_dicts()}
-
-    failures = []
-    for position, top_n in STARTER_COHORT_TOP_N.items():
-        obs = observed_by_pos[position]
-        mod = modeled_by_pos[position]
-        for ratio_key, tolerance in CALIBRATION_TOLERANCE.items():
-            rel_err = abs(mod[ratio_key] - obs[ratio_key]) / obs[ratio_key]
-            if rel_err >= tolerance:
-                failures.append(
-                    f"{position} {ratio_key}: modeled={mod[ratio_key]:.3f} vs observed "
-                    f"{obs[ratio_key]:.3f} (top-{top_n} starter cohort, "
-                    f"n_weeks={obs['n_weeks']}) -- {rel_err:.1%} off, "
-                    f"exceeds {tolerance:.0%} tolerance"
-                )
-    assert not failures, "\n".join(failures)
-
-
-# ---------------------------------------------------------------------------
-# Guard against the deep-tail extrapolation bug: a player at the bottom of
-# the ranked pool must project well below a mid-tier starter at the same
-# position, not close to it (which is what an unconstrained power-law
-# extrapolation of the ADP curve used to produce -- e.g. QB50 at 16.5 ppg,
-# barely below QB12's 19.9).
-#
-# Thresholds are position-specific, not one blanket number, because real
-# positional value curves have genuinely different depth/decay -- kickers
-# in particular are much flatter than skill positions. Each threshold below
-# is set with headroom above the *actual* deepest/mid-tier ratio measured
-# from the current fitted pool (reported in the task writeup), so this
-# fails loudly on a real regression (e.g. the pool flattening back out)
-# without being brittle to small day-to-day refits of the ADP/finish data:
-#   QB: actual ~0.20  -> threshold 0.5   (matches the coordinator's example)
-#   RB: actual ~0.05  -> threshold 0.3
-#   WR: actual ~0.10  -> threshold 0.3
-#   TE: actual ~0.23  -> threshold 0.5
-#   K:  actual ~0.73  -> threshold 0.85  (kickers are a genuinely flat position)
-DEEP_VS_MID_TIER_MAX_RATIO = {
-    "QB": 0.5,
-    "RB": 0.3,
-    "WR": 0.3,
-    "TE": 0.5,
-    "K": 0.85,
-}
-
-
-@pytest.mark.skipif(not _HAS_REAL_DATA, reason="requires ingested data/ (run scripts/ingest_all.py)")
-def test_deep_pool_players_project_well_below_mid_tier_starters():
-    rankings = read("rankings_2026")
-    weekly = read("weekly_stats")
-    adp_history = read("adp_history")
-    pool = build_player_pool(rankings=rankings, weekly=weekly, adp_history=adp_history)
-
-    by_pos: dict[str, list] = {}
-    for p in pool.values():
-        by_pos.setdefault(p.position, []).append(p)
-
-    failures = []
-    for position, mid_tier_rank in STARTER_COHORT_TOP_N.items():
-        players = sorted(by_pos[position], key=lambda p: p.rank)
-        mid_tier = players[mid_tier_rank - 1]
-        deepest = players[-1]
-        ratio = deepest.distribution.mean / mid_tier.distribution.mean
-        threshold = DEEP_VS_MID_TIER_MAX_RATIO[position]
-        if ratio >= threshold:
-            failures.append(
-                f"{position}: pool-depth player ({deepest.name}, mean="
-                f"{deepest.distribution.mean:.2f}) is {ratio:.2f}x the mid-tier "
-                f"starter ({mid_tier.name}, mean={mid_tier.distribution.mean:.2f}) "
-                f"-- exceeds the {threshold} max ratio"
-            )
-    assert not failures, "\n".join(failures)

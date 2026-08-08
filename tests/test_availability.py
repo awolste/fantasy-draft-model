@@ -11,10 +11,11 @@ from ffdraft.models.availability import (
     availability_cohort,
     eligible_weeks,
     fit_availability_rates,
+    load_or_fit_availability_rates,
     sample_availability_batch,
     team_reg_game_weeks,
 )
-from ffdraft.store import exists
+from ffdraft.store import CacheStaleError, exists
 
 # ---------------------------------------------------------------------------
 # team_reg_game_weeks / eligible_weeks: the denominator plumbing
@@ -285,6 +286,99 @@ def test_fit_recovers_position_level_rate_from_synthetic_history():
 
     assert abs(rb_row["p_available"] - 0.75) < 0.03
     assert abs(rb_row["persistence"] - 0.7) < 0.08
+
+
+# ---------------------------------------------------------------------------
+# load_or_fit_availability_rates: cache staleness (Stage 3 Task 1 Fix 1).
+# Unlike distribution.py's load_or_fit_*, this one doesn't take its inputs
+# as parameters -- it reads weekly_stats/adp_history from store and fetches
+# schedules/rosters/crosswalk itself -- so these tests fully redirect
+# DATA_DIR and stub the network-sourced loaders instead of just passing in
+# synthetic frames.
+
+
+def _full_synthetic_availability_dataset():
+    """Every `FIT_POSITIONS` position combined into one dataset, matching
+    the shape `test_fit_recovers_position_level_rate_from_synthetic_history`
+    builds -- reused here since `load_or_fit_availability_rates` fits every
+    position at once and needs all five to clear the minimum-sample guards."""
+    datasets = [
+        _build_synthetic_league("RB", p_available=0.75, persistence=0.7, seed=1),
+        _build_synthetic_league("QB", p_available=0.95, persistence=0.5, seed=2),
+        _build_synthetic_league("WR", p_available=0.95, persistence=0.5, seed=3),
+        _build_synthetic_league("TE", p_available=0.95, persistence=0.5, seed=4),
+        _build_synthetic_league("K", p_available=0.8, persistence=0.5, seed=5),
+    ]
+    schedules = pl.concat([d[0] for d in datasets]).unique()
+    rosters = pl.concat([d[1] for d in datasets])
+    weekly = pl.concat([d[2] for d in datasets])
+    adp_history = pl.concat([d[3] for d in datasets[:-1]])  # K excluded: no ADP for K
+    crosswalk = pl.concat([d[4] for d in datasets])
+    return schedules, rosters, weekly, adp_history, crosswalk
+
+
+@pytest.fixture
+def stubbed_availability_sources(tmp_path, monkeypatch):
+    """Redirect DATA_DIR to tmp_path, persist synthetic weekly_stats/
+    adp_history there, and stub the network-sourced schedules/rosters/
+    crosswalk loaders so `load_or_fit_availability_rates` can run fully
+    offline and hermetically."""
+    import ffdraft.models.availability as avail_mod
+    import ffdraft.store as store_mod
+
+    schedules, rosters, weekly, adp_history, crosswalk = _full_synthetic_availability_dataset()
+
+    monkeypatch.setattr(store_mod, "DATA_DIR", tmp_path)
+    store_mod.write("weekly_stats", weekly)
+    store_mod.write("adp_history", adp_history)
+
+    monkeypatch.setattr(avail_mod, "_load_schedules", lambda seasons: schedules)
+    monkeypatch.setattr(avail_mod, "_load_rosters_weekly", lambda seasons: rosters)
+    monkeypatch.setattr(avail_mod, "load_crosswalk", lambda: crosswalk)
+    return weekly, adp_history
+
+
+def test_load_or_fit_availability_rates_hits_cache_when_input_unchanged(
+    stubbed_availability_sources, monkeypatch
+):
+    import ffdraft.models.availability as avail_mod
+
+    first = load_or_fit_availability_rates()
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("fit_availability_rates should not be called on a cache hit")
+
+    monkeypatch.setattr(avail_mod, "fit_availability_rates", _boom)
+    second = load_or_fit_availability_rates()
+    assert second.to_dicts() == first.to_dicts()
+
+
+def test_load_or_fit_availability_rates_raises_on_changed_weekly_stats(
+    stubbed_availability_sources,
+):
+    import ffdraft.store as store_mod
+
+    load_or_fit_availability_rates()
+
+    _, _, changed_weekly, _, _ = _full_synthetic_availability_dataset()
+    # A different seed's synthetic data re-ingested under the same name --
+    # exactly the "weekly_stats re-ingested with new data" scenario.
+    store_mod.write("weekly_stats", changed_weekly.with_columns(pl.col("fantasy_points") + 1.0))
+    with pytest.raises(CacheStaleError, match="force_refit"):
+        load_or_fit_availability_rates()
+
+
+def test_load_or_fit_availability_rates_force_refit_overrides_stale_cache(
+    stubbed_availability_sources,
+):
+    import ffdraft.store as store_mod
+
+    load_or_fit_availability_rates()
+    _, _, changed_weekly, _, _ = _full_synthetic_availability_dataset()
+    store_mod.write("weekly_stats", changed_weekly.with_columns(pl.col("fantasy_points") + 1.0))
+
+    load_or_fit_availability_rates(force_refit=True)  # must not raise
+    load_or_fit_availability_rates()  # cache now matches the new data
 
 
 # ---------------------------------------------------------------------------

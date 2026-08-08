@@ -169,7 +169,7 @@ import polars as pl
 from ..ids import load_crosswalk, match_by_name
 from ..league import REGULAR_SEASON_WEEKS
 from ..sources._nflverse_compat import load_from_nflverse
-from ..store import exists, read, write
+from ..store import check_cache_fresh, exists, fingerprint, read, write, write_fingerprint
 
 # ---------------------------------------------------------------------------
 # Raw data loaders
@@ -382,8 +382,28 @@ def load_or_fit_availability_rates(force_refit: bool = False) -> pl.DataFrame:
     """Cached wrapper: fetches nflreadpy schedules/rosters plus this
     project's already-ingested `weekly_stats`/`adp_history` datasets and the
     ID crosswalk, fits once, and persists the result -- so normal use (and
-    tests that don't pass `force_refit`) never hits the network."""
+    tests that don't pass `force_refit`) never hits the network.
+
+    Cache freshness is checked against a fingerprint of `weekly_stats` and
+    `adp_history` only -- not the crosswalk or the nflreadpy
+    schedules/rosters. Those two are cheap, already-persisted local parquet
+    files (this function has to read them either way to have any input to
+    fit from), so checking them costs a few tens of milliseconds even on a
+    cache hit. `load_crosswalk()`, by contrast, is a live network fetch
+    measured at ~1.4s; including it in the fingerprint would mean paying a
+    network round-trip on *every* call just to confirm a cache hit,
+    defeating the purpose of caching at all -- exactly the invisible
+    performance cliff this cache exists to avoid. Schedules/rosters are
+    similarly only fetched on an actual refit today and are left out for
+    the same reason. This means a crosswalk-only change (rare -- it's an ID
+    mapping, not seasonal stats) won't trigger a refit; re-ingesting
+    `weekly_stats` or `adp_history` will."""
+    weekly = read("weekly_stats")
+    adp_history = read("adp_history")
+    fp = fingerprint(weekly, adp_history)
+
     if not force_refit and exists("availability_rates"):
+        check_cache_fresh("availability_rates", fp)
         return read("availability_rates")
 
     # Rosters (and hence eligibility) are only fetched for `ADP_SEASONS` --
@@ -392,12 +412,11 @@ def load_or_fit_availability_rates(force_refit: bool = False) -> pl.DataFrame:
     # wider effective window than QB/RB/WR/TE.
     schedules = _load_schedules(ADP_SEASONS)
     rosters_weekly = _load_rosters_weekly(ADP_SEASONS)
-    weekly = read("weekly_stats")
-    adp_history = read("adp_history")
     crosswalk = load_crosswalk()
 
     table = fit_availability_rates(schedules, rosters_weekly, weekly, adp_history, crosswalk)
     write("availability_rates", table)
+    write_fingerprint("availability_rates", fp)
     return table
 
 
@@ -547,9 +566,16 @@ def sample_availability_batch(
 # Public lookup
 
 
-def availability_by_position(force_refit: bool = False) -> dict[str, PlayerAvailability]:
-    """Every position's fitted `PlayerAvailability`, keyed by position."""
-    table = load_or_fit_availability_rates(force_refit=force_refit)
+def hydrate_availability_table(table: pl.DataFrame) -> dict[str, PlayerAvailability]:
+    """Turn `fit_availability_rates`'s raw parameter table into hydrated
+    `PlayerAvailability` objects keyed by position -- factored out of
+    `availability_by_position` so a caller that deliberately bypasses the
+    disk cache (e.g. Stage 3's Task 6 backtest, which fits availability
+    from schedules/rosters/`weekly_stats`/`adp_history` restricted to
+    seasons through 2023 to avoid leaking the held-out 2024 season, and
+    must not overwrite the live cache -- there is only one, unnamespaced
+    `"availability_rates"` cache slot) can reuse this exact hydration
+    instead of duplicating it."""
     return {
         row["position"]: PlayerAvailability(
             position=row["position"],
@@ -559,3 +585,9 @@ def availability_by_position(force_refit: bool = False) -> dict[str, PlayerAvail
         )
         for row in table.to_dicts()
     }
+
+
+def availability_by_position(force_refit: bool = False) -> dict[str, PlayerAvailability]:
+    """Every position's fitted `PlayerAvailability`, keyed by position."""
+    table = load_or_fit_availability_rates(force_refit=force_refit)
+    return hydrate_availability_table(table)

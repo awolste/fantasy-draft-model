@@ -76,10 +76,11 @@ from ffdraft.league import (
     REGULAR_SEASON_WEEKS,
 )
 from ffdraft.models import distribution as dist_mod
-from ffdraft.models.availability import PlayerAvailability, availability_by_position, sample_availability_batch
+from ffdraft.models.availability import availability_by_position, sample_availability_batch
 from ffdraft.models.defense import dst_distribution
 from ffdraft.models.distribution import ZeroInflatedGammaDistribution
 from ffdraft.models.replacement import replacement_by_position
+from ffdraft.models.roster import DraftPick, build_roster
 from ffdraft.sim.lineup import build_replacement_means
 from ffdraft.sim.season import (
     SeasonRosterPlayer,
@@ -277,29 +278,29 @@ DIVERSIFIED_SKILL = [
 ]  # 8 distinct NFL teams, projected mean within ~0.2% of the stacked roster
 
 
-def _make_roster_players(
+def _make_roster_picks(
     specs: list[tuple[str, str, str]],
     by_name: dict[tuple[str, str], dist_mod.PlayerDistribution],
-    availability: dict[str, PlayerAvailability],
-) -> list[SeasonRosterPlayer]:
-    out = []
-    for name, position, _team in specs:
-        pd_ = by_name[(name, position)]
-        out.append(SeasonRosterPlayer(pd_.player_id, position, pd_.distribution, availability.get(position)))
-    return out
+) -> list[DraftPick]:
+    """(name, position, team) specs -> `(player_id, position)` picks for
+    `build_roster`. Every spec here is a real, current 2026 pool entry (see
+    `STACKED_SKILL`/`DIVERSIFIED_SKILL`), so this never hits build_roster's
+    fallback path -- it exists only to resolve the human-readable name/team
+    spec down to the pool's own `player_id`."""
+    return [(by_name[(name, position)].player_id, position) for name, position, _team in specs]
 
 
-def _draft_filler_rosters(
+def _draft_filler_picks(
     pool: dict[str, dist_mod.PlayerDistribution],
     used_names: set[str],
-    availability: dict[str, PlayerAvailability],
     n_teams: int = 8,
-) -> list[list[SeasonRosterPlayer]]:
-    """8 reasonably strong, reasonably distinct opponent rosters, drafted
-    best-available-by-position (round-robin across the `n_teams` teams) from
-    the remaining pool. Not part of the measurement itself -- just a fixed,
-    plausible backdrop of opponents so the championship-probability
-    comparison isn't against an empty or degenerate league."""
+) -> list[list[DraftPick]]:
+    """8 reasonably strong, reasonably distinct opponent rosters' worth of
+    picks, drafted best-available-by-position (round-robin across the
+    `n_teams` teams) from the remaining pool. Not part of the measurement
+    itself -- just a fixed, plausible backdrop of opponents so the
+    championship-probability comparison isn't against an empty or
+    degenerate league."""
     by_pos: dict[str, list[dist_mod.PlayerDistribution]] = {p: [] for p in SKILL}
     for pd_ in pool.values():
         if pd_.position in SKILL and pd_.name not in used_names:
@@ -307,13 +308,13 @@ def _draft_filler_rosters(
     for pos in by_pos:
         by_pos[pos].sort(key=lambda p: p.rank)
 
-    rosters: list[list[SeasonRosterPlayer]] = [[] for _ in range(n_teams)]
+    picks: list[list[DraftPick]] = [[] for _ in range(n_teams)]
 
     def take(pos: str, count: int) -> None:
         for _ in range(count):
             for t in range(n_teams):
                 pd_ = by_pos[pos].pop(0)
-                rosters[t].append(SeasonRosterPlayer(pd_.player_id, pos, pd_.distribution, availability.get(pos)))
+                picks[t].append((pd_.player_id, pos))
 
     take("QB", 1)
     take("RB", 2)
@@ -324,9 +325,9 @@ def _draft_filler_rosters(
     for _ in range(2):
         for t in range(n_teams):
             pd_ = flex_pool.pop(0)
-            rosters[t].append(SeasonRosterPlayer(pd_.player_id, pd_.position, pd_.distribution, availability.get(pd_.position)))
+            picks[t].append((pd_.player_id, pd_.position))
 
-    return rosters
+    return picks
 
 
 def build_experiment_rosters() -> tuple[list[list[SeasonRosterPlayer]], dict[str, float], float]:
@@ -337,26 +338,28 @@ def build_experiment_rosters() -> tuple[list[list[SeasonRosterPlayer]], dict[str
     by_name = _pool_by_name(pool)
     availability = availability_by_position()
     dst_dist = dst_distribution()
-
-    stacked = _make_roster_players(STACKED_SKILL, by_name, availability)
-    diversified = _make_roster_players(DIVERSIFIED_SKILL, by_name, availability)
+    replacement = replacement_by_position()
+    # build_roster's contract: replacement_by_position must carry a "DST"
+    # entry, since every DST shares one distribution -- see models/roster.py.
+    replacement_with_dst = {**replacement, "DST": dst_dist}
 
     kickers = sorted((p for p in pool.values() if p.position == "K"), key=lambda p: p.rank)
-    stacked.append(SeasonRosterPlayer(kickers[0].player_id, "K", kickers[0].distribution, availability.get("K")))
-    diversified.append(SeasonRosterPlayer(kickers[1].player_id, "K", kickers[1].distribution, availability.get("K")))
-    stacked.append(SeasonRosterPlayer("DST::stacked", "DST", dst_dist, None))
-    diversified.append(SeasonRosterPlayer("DST::diversified", "DST", dst_dist, None))
+
+    stacked_picks = _make_roster_picks(STACKED_SKILL, by_name) + [(kickers[0].player_id, "K"), ("DST::stacked", "DST")]
+    diversified_picks = _make_roster_picks(DIVERSIFIED_SKILL, by_name) + [
+        (kickers[1].player_id, "K"), ("DST::diversified", "DST"),
+    ]
 
     used_names = {n for n, _, _ in STACKED_SKILL} | {n for n, _, _ in DIVERSIFIED_SKILL}
-    fillers = _draft_filler_rosters(pool, used_names, availability, n_teams=N_TEAMS - 2)
-    for i, roster in enumerate(fillers):
-        k = kickers[2 + i]
-        roster.append(SeasonRosterPlayer(k.player_id, "K", k.distribution, availability.get("K")))
-        roster.append(SeasonRosterPlayer(f"DST::filler{i}", "DST", dst_dist, None))
+    filler_picks = _draft_filler_picks(pool, used_names, n_teams=N_TEAMS - 2)
+    for i, picks in enumerate(filler_picks):
+        picks.append((kickers[2 + i].player_id, "K"))
+        picks.append((f"DST::filler{i}", "DST"))
 
-    rosters = [stacked, diversified] + fillers
+    all_picks = [stacked_picks, diversified_picks] + filler_picks
+    rosters = [build_roster(picks, pool, replacement_with_dst, availability).players for picks in all_picks]
+    stacked, diversified = rosters[0], rosters[1]
 
-    replacement = replacement_by_position()
     replacement_means = build_replacement_means(replacement, dst_dist.mean)
 
     proj_stacked = sum(p.distribution.mean for p in stacked)

@@ -147,6 +147,13 @@ def _validate_replacement_means(
     starters: Mapping[str, int],
     flex_eligible: frozenset[str],
 ) -> None:
+    """Shared by `solve_lineup` here and `sim/season.py`'s `_team_weekly_totals`
+    -- both need every dedicated/FLEX-eligible position to have a
+    replacement-level value so an empty slot never silently falls back to
+    zero. Consolidated to one implementation (imported by `sim/season.py`)
+    rather than two near-identical copies; the two call sites' error
+    messages previously differed only in their last sentence, which no
+    test or caller depended on, so this keeps the more informative one."""
     needed = {pos for pos, count in starters.items() if pos != "FLEX" and count > 0}
     needed |= set(flex_eligible)
     missing = needed - set(replacement_means)

@@ -1,5 +1,7 @@
 # Plan Index
 
+> **Picking this project up cold? Start with [`docs/HANDOFF.md`](../../HANDOFF.md)** — current status, decisions made and why, open items, and the recurring failure pattern. Then come back here for the stage roadmap.
+
 **Read this first if you are picking up this project.**
 
 1. Read the design spec: [`../specs/2026-08-02-ff-draft-2026-design.md`](../specs/2026-08-02-ff-draft-2026-design.md). It contains the league configuration, the approach and why alternatives were rejected, and the validation gate. Do not re-litigate decisions recorded there without a reason.
@@ -8,11 +10,21 @@
 
 Each stage produces working, independently testable software. Stages are written one at a time, on purpose: writing Stage 3's plan before Stage 2's models exist would lock in decisions about model internals before the real data has been seen.
 
+## The league-specific edge (Stage 3, confirmed by the owner)
+
+**This league drafts quarterbacks later than consensus ADP** — fitted positional bias −0.100 log-reach, the strongest negative of any position. That is backwards from what the scoring implies: the league uses **6-point passing touchdowns** while essentially every public ranking assumes 4, so QBs are genuinely worth more here than the rankings leaguemates are reading.
+
+The owner confirmed the cause: the league drafts off generic ESPN rankings and is not especially sophisticated about adjusting for scoring settings. This is therefore a real, persistent inefficiency rather than a one-season artifact.
+
+It should surface on its own without hand-coding, because two independent parts of the model already encode it: Stage 2's player distributions anchor QB means to **actual league scoring computed from raw stat lines**, and Stage 3's opponent model says QBs survive longer than that value warrants. If Stage 3's recommender does *not* show QB value later than consensus, something is wrong with how those two pieces compose — treat that as a bug signal.
+
+Also note the deep-pick censoring caveat: `adp_history` is a top-N export that does not reach this league's deepest bench stashes, so 7.85% of picks fail to match, concentrated in DST (19.2%), K (15.8%) and TE (15.4%). That censors the latest picks for those positions and inflates their fitted "earlier than ADP" reading. Directions are trustworthy; magnitudes for those three are not.
+
 ## Stage 2 findings that Stage 3 depends on
 
 Measured, not assumed. Do not re-derive these; do check them if a Stage 3 result looks strange.
 
-- **Realistic edge is small.** In the 2024 calibration, the best-drafted roster had ~17% championship probability against a 10% baseline, and the actual champion drew 9.1%. A 60% playoff rate plus a 3-round bracket washes out most roster edge. If Stage 3's backtest claims a large edge over ADP-following, suspect overfitting rather than success.
+- **Realistic edge is small.** In the 2024 calibration, the best-drafted roster had ~16% championship probability against a 10% baseline, and the actual champion drew 10.3%. *(Corrected during Stage 3 Task 1: fallback/replacement players were having an availability model applied on top of a replacement level already conditioned on streaming a healthy player, double-counting injury risk. The champion's figure was 9.1% before the fix.)* A 60% playoff rate plus a 3-round bracket washes out most roster edge. If Stage 3's backtest claims a large edge over ADP-following, suspect overfitting rather than success.
 - **Correlation is not material — measured, not assumed.** Real weekly correlations: QB1–WR1 same team **0.372**, QB1–TE1 0.281, opposing-team skill totals 0.187, QB1–RB1 0.070, and WR1–WR2 same team only **0.034** (shared offense is cancelled by target competition). Injecting a calibrated copula moves the stacked-vs-diversified championship gap by **−0.42pp** against a 0.22pp SE bound. The production simulator stays on independent sampling. Note the sign: correlation *reduces* a stacked roster's edge, because clustered bad weeks cost more than clustered good weeks when 60% of the league makes the playoffs. See `scripts/correlation_impact.py`.
 - **Replacement level is an order statistic, not a mean.** What you get off waivers is the best available option each week, not the average deep player. Measured (points/week): QB 18.3, RB 9.6, WR 9.9, TE 8.1, K 7.9 — against starter medians of 24.3 / 15.9 / 16.4 / 12.4 / 9.0. A rostered RB starter is worth ~6.4/week over waivers and a WR ~6.5 — nearly identical, which bears directly on the 0RB question.
 - **Availability must be persistent, not independent.** P(out next week | out this week) is **75.5%**, versus 7.1% if available. Modeled as a two-state Markov chain. Independent draws would treat a season-ending injury as 14 coin flips.
@@ -25,7 +37,7 @@ Measured, not assumed. Do not re-derive these; do check them if a Stage 3 result
 |---|---|---|---|
 | 1 | [`2026-08-02-data-foundation.md`](2026-08-02-data-foundation.md) | Every input pulled, ID-matched, scored under league rules, validated | **Complete** — 97 tests, 9 datasets |
 | 2 | [`2026-08-02-player-and-season-model.md`](2026-08-02-player-and-season-model.md) | Weekly points distributions per player; season simulator taking 10 rosters to a champion | **Complete** — 210 tests, 1,000 seasons in 0.17s |
-| 3 | [`2026-08-03-opponent-model-and-optimizer.md`](2026-08-03-opponent-model-and-optimizer.md) | Opponent draft model, draft rollout, recommender, backtest, and the 0RB vs. Hero RB answer | **Ready to start** |
+| 3 | [`2026-08-03-opponent-model-and-optimizer.md`](2026-08-03-opponent-model-and-optimizer.md) | Opponent draft model, draft rollout, recommender, backtest, and the 0RB vs. Hero RB answer | **Complete** — answer: structure does not matter (HANDOFF §7c) |
 | 4 | *not yet written* — `live-assistant.md` | Streamlit draft-day tool with type-ahead pick entry | Not started |
 
 **Stage 4 should not begin before August 2026**, when ESPN's 2026 endpoints are live and live-draft behavior can be tested against reality.

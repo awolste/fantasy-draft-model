@@ -7,11 +7,12 @@ from ffdraft.models.replacement import (
     ReplacementLevelDistribution,
     deep_pool_average,
     drafted_player_ids,
+    load_or_fit_replacement_values,
     median_rostered_starter,
     replacement_by_position,
     weekly_replacement_values,
 )
-from ffdraft.store import exists
+from ffdraft.store import CacheStaleError, exists
 
 # ---------------------------------------------------------------------------
 # drafted_player_ids: identity resolution + position labeling
@@ -184,18 +185,113 @@ def test_empty_values_raises():
 
 
 # ---------------------------------------------------------------------------
+# load_or_fit_replacement_values: cache staleness (Stage 3 Task 1 Fix 1)
+
+
+def _full_synthetic_replacement_dataset(n_seasons: int = 10):
+    """`_synthetic_season` covers one (position, season); combine every
+    `POSITIONS` position across enough synthetic seasons to clear
+    `MIN_SEASON_WEEK_OBS` (30) per position -- each season contributes one
+    (season, week) row per week 2-5 (week 1 has no trailing history), so
+    `n_seasons=10` gives 40 rows per position, comfortably above the
+    threshold."""
+    weekly_frames = []
+    drafted_frames = []
+    for position in POSITIONS:
+        for season in range(2015, 2015 + n_seasons):
+            weekly, drafted = _synthetic_season(position, season, n_weeks=5)
+            weekly_frames.append(weekly)
+            drafted_frames.append(drafted)
+    return pl.concat(weekly_frames), pl.concat(drafted_frames)
+
+
+@pytest.fixture
+def stubbed_replacement_sources(monkeypatch):
+    """`_synthetic_season` hands back a ready-made `drafted` frame directly
+    rather than one resolved from `league_drafts`/`crosswalk` via
+    `drafted_player_ids` -- stub that resolution step so
+    `load_or_fit_replacement_values` can be exercised end to end without
+    needing realistic league_drafts/crosswalk fixtures."""
+    import ffdraft.models.replacement as repl_mod
+
+    weekly, drafted = _full_synthetic_replacement_dataset()
+    monkeypatch.setattr(repl_mod, "drafted_player_ids", lambda *a, **k: drafted)
+    league_drafts = pl.DataFrame({"placeholder": [1]})
+    crosswalk = pl.DataFrame({"placeholder": [1]})
+    return weekly, league_drafts, crosswalk
+
+
+def test_load_or_fit_replacement_values_hits_cache_when_input_unchanged(
+    tmp_path, monkeypatch, stubbed_replacement_sources
+):
+    import ffdraft.models.replacement as repl_mod
+    import ffdraft.store as store_mod
+
+    monkeypatch.setattr(store_mod, "DATA_DIR", tmp_path)
+    weekly, league_drafts, crosswalk = stubbed_replacement_sources
+    first = load_or_fit_replacement_values(weekly=weekly, league_drafts=league_drafts, crosswalk=crosswalk)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("weekly_replacement_values should not be called on a cache hit")
+
+    monkeypatch.setattr(repl_mod, "weekly_replacement_values", _boom)
+    second = load_or_fit_replacement_values(weekly=weekly, league_drafts=league_drafts, crosswalk=crosswalk)
+    assert second.to_dicts() == first.to_dicts()
+
+
+def test_load_or_fit_replacement_values_raises_on_changed_input(
+    tmp_path, monkeypatch, stubbed_replacement_sources
+):
+    import ffdraft.store as store_mod
+
+    monkeypatch.setattr(store_mod, "DATA_DIR", tmp_path)
+    weekly, league_drafts, crosswalk = stubbed_replacement_sources
+    load_or_fit_replacement_values(weekly=weekly, league_drafts=league_drafts, crosswalk=crosswalk)
+
+    changed_weekly = weekly.with_columns(pl.col("fantasy_points") + 1.0)
+    with pytest.raises(CacheStaleError, match="force_refit"):
+        load_or_fit_replacement_values(weekly=changed_weekly, league_drafts=league_drafts, crosswalk=crosswalk)
+
+
+def test_load_or_fit_replacement_values_force_refit_overrides_stale_cache(
+    tmp_path, monkeypatch, stubbed_replacement_sources
+):
+    import ffdraft.store as store_mod
+
+    monkeypatch.setattr(store_mod, "DATA_DIR", tmp_path)
+    weekly, league_drafts, crosswalk = stubbed_replacement_sources
+    load_or_fit_replacement_values(weekly=weekly, league_drafts=league_drafts, crosswalk=crosswalk)
+
+    changed_weekly = weekly.with_columns(pl.col("fantasy_points") + 1.0)
+    load_or_fit_replacement_values(
+        weekly=changed_weekly, league_drafts=league_drafts, crosswalk=crosswalk, force_refit=True
+    )  # must not raise
+    load_or_fit_replacement_values(weekly=changed_weekly, league_drafts=league_drafts, crosswalk=crosswalk)
+
+
+# ---------------------------------------------------------------------------
 # Real-data regression guards -- gated on the cached fit existing.
 
 _HAS_REPLACEMENT_FIT = exists("replacement_weekly_values") or exists("weekly_stats")
 
 
-def _get_replacement_and_baselines():
+def _get_replacement_and_baselines(monkeypatch, tmp_path):
+    """`_HAS_REPLACEMENT_FIT` is true even when `replacement_weekly_values`
+    itself isn't cached yet (it also passes when only `weekly_stats`
+    exists), so `replacement_by_position` below may need to fit-and-persist
+    a brand new cache. Redirect `DATA_DIR` to `tmp_path` before calling it
+    -- after reading the real (already-ingested) inputs, but before any
+    possible `store.write` -- so that write can never land in the real,
+    gitignored `data/replacement_weekly_values.parquet`."""
+    import ffdraft.store as store_mod
     from ffdraft.store import read
 
     weekly = read("weekly_stats")
     league_drafts = read("league_drafts")
     crosswalk = read("id_crosswalk")
     drafted = drafted_player_ids(league_drafts, crosswalk, weekly)
+
+    monkeypatch.setattr(store_mod, "DATA_DIR", tmp_path)
 
     replacement = replacement_by_position(weekly=weekly, league_drafts=league_drafts, crosswalk=crosswalk)
     starters = median_rostered_starter(weekly)
@@ -204,18 +300,18 @@ def _get_replacement_and_baselines():
 
 
 @pytest.mark.skipif(not _HAS_REPLACEMENT_FIT, reason="requires weekly_stats/league_drafts/id_crosswalk data")
-def test_replacement_level_is_positive_for_every_position():
-    replacement, _, _ = _get_replacement_and_baselines()
+def test_replacement_level_is_positive_for_every_position(monkeypatch, tmp_path):
+    replacement, _, _ = _get_replacement_and_baselines(monkeypatch, tmp_path)
     for position in POSITIONS:
         assert replacement[position].mean > 0, position
 
 
 @pytest.mark.skipif(not _HAS_REPLACEMENT_FIT, reason="requires weekly_stats/league_drafts/id_crosswalk data")
-def test_replacement_level_is_below_median_starter_and_above_deep_pool():
+def test_replacement_level_is_below_median_starter_and_above_deep_pool(monkeypatch, tmp_path):
     """The central-trap regression guard: replacement level must sit
     strictly between the deep-pool average (the trap) and the median
     rostered starter (too generous) for every position."""
-    replacement, starters, deep = _get_replacement_and_baselines()
+    replacement, starters, deep = _get_replacement_and_baselines(monkeypatch, tmp_path)
     starters_by_pos = {r["position"]: r["median_starter"] for r in starters.to_dicts()}
     deep_by_pos = {r["position"]: r["deep_pool_avg"] for r in deep.to_dicts()}
 
@@ -227,19 +323,19 @@ def test_replacement_level_is_below_median_starter_and_above_deep_pool():
 
 
 @pytest.mark.skipif(not _HAS_REPLACEMENT_FIT, reason="requires weekly_stats/league_drafts/id_crosswalk data")
-def test_replacement_level_varies_by_week_not_a_single_constant():
-    replacement, _, _ = _get_replacement_and_baselines()
+def test_replacement_level_varies_by_week_not_a_single_constant(monkeypatch, tmp_path):
+    replacement, _, _ = _get_replacement_and_baselines(monkeypatch, tmp_path)
     for position in POSITIONS:
         assert len(set(replacement[position].values)) > 5, position
 
 
 @pytest.mark.skipif(not _HAS_REPLACEMENT_FIT, reason="requires weekly_stats/league_drafts/id_crosswalk data")
-def test_qb_and_k_replacement_are_relatively_closer_to_starters_than_rb_and_wr():
+def test_qb_and_k_replacement_are_relatively_closer_to_starters_than_rb_and_wr(monkeypatch, tmp_path):
     """The streamability finding: if QB/K replacement is relatively closer
     to its own starter median than RB/WR is, report it -- this is a
     regression guard on an observed finding, not an assumed one. See the
     Task 5 report for the actual ratios if this ever needs re-deriving."""
-    replacement, starters, _ = _get_replacement_and_baselines()
+    replacement, starters, _ = _get_replacement_and_baselines(monkeypatch, tmp_path)
     starters_by_pos = {r["position"]: r["median_starter"] for r in starters.to_dicts()}
 
     ratios = {

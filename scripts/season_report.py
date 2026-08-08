@@ -20,8 +20,9 @@ from ffdraft.models import distribution as dist_mod
 from ffdraft.models.availability import availability_by_position
 from ffdraft.models.defense import dst_distribution
 from ffdraft.models.replacement import replacement_by_position
+from ffdraft.models.roster import DraftPick, build_roster
 from ffdraft.sim.lineup import build_replacement_means
-from ffdraft.sim.season import SeasonRosterPlayer, simulate_season
+from ffdraft.sim.season import simulate_season
 from ffdraft.store import read
 
 SEASON = 2024
@@ -75,10 +76,13 @@ def build_2024_rosters():
     )
 
     replacement = replacement_by_position(weekly=weekly)
+    # build_roster's contract: replacement_by_position must carry a "DST"
+    # entry, since every DST shares one distribution -- there is no separate
+    # "replacement level" defense. See models/roster.py's module docstring.
+    replacement_with_dst = {**replacement, "DST": dst_distribution()}
     availability = availability_by_position()
     dst_dist = dst_distribution()
 
-    rosters: list[list[SeasonRosterPlayer]] = [[] for _ in range(N_TEAMS)]
     team_ids = sorted(league_drafts["team_id"].unique().to_list())
     team_id_to_idx = {tid: i for i, tid in enumerate(team_ids)}
     draft_slot = {
@@ -86,9 +90,10 @@ def build_2024_rosters():
         for row in league_drafts.filter(pl.col("round") == 1).to_dicts()
     }
 
-    n_fallback = 0
+    team_picks: list[list[DraftPick]] = [[] for _ in range(N_TEAMS)]
     n_dst = 0
     n_total = 0
+    n_unresolvable = 0
     for row in resolved.to_dicts():
         n_total += 1
         team_idx = team_id_to_idx[row["team_id"]]
@@ -96,10 +101,12 @@ def build_2024_rosters():
         gsis_id = row["gsis_id"]
 
         if espn_pid < 0:
-            # ESPN's negative sentinel IDs are team defenses.
-            rosters[team_idx].append(
-                SeasonRosterPlayer(f"DST::draft::{row['overall_pick']}", "DST", dst_dist, None)
-            )
+            # ESPN's negative sentinel IDs are team defenses. This synthetic
+            # id is never in the pool, so build_roster always falls back to
+            # replacement_with_dst["DST"] -- the same shared dst_dist object
+            # every pool DST entry points to, so this is not actually a
+            # fallback in effect, just in bookkeeping.
+            team_picks[team_idx].append((f"DST::draft::{row['overall_pick']}", "DST"))
             n_dst += 1
             continue
 
@@ -110,52 +117,48 @@ def build_2024_rosters():
                 position = pos_row["position"][0]
 
         if position is not None and gsis_id in pool_by_gsis:
-            pd_ = pool_by_gsis[gsis_id]
-            avail = availability.get(pd_.position)
-            rosters[team_idx].append(SeasonRosterPlayer(gsis_id, pd_.position, pd_.distribution, avail))
+            team_picks[team_idx].append((gsis_id, position))
         elif position is not None and position == "K":
             # Matched to a real position (K) via weekly_stats, but the pool
             # keys kickers as "K::name" (bypasses ID matching per
-            # distribution.py) -- try a name-based lookup as a fallback
-            # before giving up and using replacement level.
+            # distribution.py) -- try a name-based lookup; build_roster
+            # itself handles "found in pool" vs "fall back to replacement".
             name_row = weekly.filter(pl.col("player_id") == gsis_id).select("player_name").head(1)
-            found = False
-            if name_row.height:
-                key = f"K::{name_row['player_name'][0]}"
-                if key in pool:
-                    pd_ = pool[key]
-                    rosters[team_idx].append(
-                        SeasonRosterPlayer(gsis_id, "K", pd_.distribution, availability.get("K"))
-                    )
-                    found = True
-            if not found:
-                rosters[team_idx].append(
-                    SeasonRosterPlayer(
-                        gsis_id or f"unmatched::{row['overall_pick']}", "K", replacement["K"], None
-                    )
-                )
-                n_fallback += 1
+            key = f"K::{name_row['player_name'][0]}" if name_row.height else gsis_id
+            team_picks[team_idx].append((key, "K"))
         elif position is not None:
             # Real, identified player at a known skill position, but not in
             # the ADP-2024-anchored pool (e.g. undrafted-by-ADP deep bench
-            # pick) -- explicit replacement-level fallback, not silent.
-            rosters[team_idx].append(
-                SeasonRosterPlayer(
-                    gsis_id or f"unmatched::{row['overall_pick']}",
-                    position,
-                    replacement[position],
-                    availability.get(position),
-                )
-            )
-            n_fallback += 1
+            # pick) -- build_roster falls back to replacement level, not
+            # silently.
+            team_picks[team_idx].append((gsis_id or f"unmatched::{row['overall_pick']}", position))
         else:
-            # Could not resolve identity or position at all. Still explicit:
-            # assign a generic replacement-level bench player rather than
-            # dropping the pick, but there is no defensible position to bucket
-            # it under, so skip -- this is reported, never silent.
-            n_fallback += 1
+            # Could not resolve identity or position at all. There is no
+            # defensible position to bucket this under, so it is skipped
+            # entirely rather than passed to build_roster with a guessed
+            # position -- reported via n_unresolvable, never silent. (Not
+            # observed in the real 2024 data as of this writing -- every
+            # pick resolves to a position -- but kept as an explicit,
+            # reported escape hatch rather than assumed away.)
+            n_unresolvable += 1
 
-    print(f"2024 roster build: {n_total} picks, {n_dst} DST, {n_fallback} replacement-level fallbacks")
+    rosters = []
+    n_fallback = 0
+    for picks in team_picks:
+        result = build_roster(picks, pool, replacement_with_dst, availability)
+        rosters.append(result.players)
+        # DST fallbacks are a bookkeeping artifact, not a real gap (see the
+        # comment above where DST picks are appended) -- excluded from the
+        # headline count so it reports the same thing it always has: picks
+        # that landed on replacement level because the *player* wasn't
+        # found, not because DST never goes through the pool by id.
+        n_fallback += result.n_fallback - sum(1 for pid in result.fallback_player_ids if pid.startswith("DST::"))
+    n_fallback += n_unresolvable
+
+    print(
+        f"2024 roster build: {n_total} picks, {n_dst} DST, {n_fallback} replacement-level "
+        f"fallbacks ({n_unresolvable} entirely unresolvable, skipped)"
+    )
     return rosters, team_ids, draft_slot, replacement, dst_dist
 
 

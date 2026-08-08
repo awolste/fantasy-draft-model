@@ -104,7 +104,7 @@ import numpy as np
 import polars as pl
 
 from ..league import N_TEAMS, REGULAR_SEASON_WEEKS, STARTERS
-from ..store import exists, read, write
+from ..store import check_cache_fresh, exists, fingerprint, read, write, write_fingerprint
 from .base import WeeklyDistribution
 
 POSITIONS: tuple[str, ...] = ("QB", "RB", "WR", "TE", "K")
@@ -256,15 +256,25 @@ def load_or_fit_replacement_values(
     crosswalk: pl.DataFrame | None = None,
     force_refit: bool = False,
 ) -> pl.DataFrame:
-    if not force_refit and exists("replacement_weekly_values"):
-        return read("replacement_weekly_values")
-
+    """Cached wrapper around `weekly_replacement_values`. Cache freshness is
+    checked against a fingerprint of `weekly`/`league_drafts`/`crosswalk` --
+    all three are cheap, already-persisted local parquet files (unlike
+    `availability.py`'s crosswalk, which is a live network fetch), so
+    fingerprinting all three on every call (including cache hits) is cheap
+    here. See `distribution.load_or_fit_tier_shapes` for the staleness
+    contract (`CacheStaleError` on mismatch, `force_refit=True` to refit
+    intentionally)."""
     if weekly is None:
         weekly = read("weekly_stats")
     if league_drafts is None:
         league_drafts = read("league_drafts")
     if crosswalk is None:
         crosswalk = read("id_crosswalk")
+
+    fp = fingerprint(weekly, league_drafts, crosswalk)
+    if not force_refit and exists("replacement_weekly_values"):
+        check_cache_fresh("replacement_weekly_values", fp)
+        return read("replacement_weekly_values")
 
     drafted = drafted_player_ids(league_drafts, crosswalk, weekly)
     table = weekly_replacement_values(weekly, drafted)
@@ -278,6 +288,7 @@ def load_or_fit_replacement_values(
             )
 
     write("replacement_weekly_values", table)
+    write_fingerprint("replacement_weekly_values", fp)
     return table
 
 
