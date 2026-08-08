@@ -36,7 +36,7 @@ Full K and DST scoring rules are in the spec. Two bands are **neutral, not missi
 | 3 | Opponent model + optimizer | **Complete (7 of 7)**, merged to `main` |
 | 4 | Live draft assistant | Not started, no plan written |
 
-**Stage 3 is merged to `main` (commit `c48ff46`). 362 tests pass**, suite ~11.5 minutes. Note `main` is ahead of `origin/main` and has not been pushed. See open item 8 before trusting a single green suite run.
+**Stage 3 is merged and pushed to `origin/main`. 362 tests pass in ~7:40** on the native arm64 venv (was ~11:30 under Rosetta). See §9/§10 for why the runtime was replaced — that work is done, and open item 8 is closed.
 
 Stage 3 is **complete**. Task 7, the structure study, is **answered: draft structure does not matter** — 0RB, Hero RB and 2RB:1WR are statistically indistinguishable across 2020–2024. See §7c for the numbers and for the finding that does matter (the early-QB decision).
 
