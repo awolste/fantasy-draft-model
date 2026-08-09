@@ -31,6 +31,8 @@ from __future__ import annotations
 
 import time
 
+import numpy as np
+
 import streamlit as st
 
 # Absolute imports, deliberately: Streamlit executes this file as
@@ -41,6 +43,20 @@ from ffdraft.live.budget import FULL_BUDGET, LIVE_BUDGET
 from ffdraft.live.cache import candidates_to_rows, recommend, state_key
 from ffdraft.live.context import live_context
 from ffdraft.live.state import DraftBoard
+from ffdraft.live.survival import (
+    DEFAULT_N_SIMS,
+    annotate_rows,
+    picks_until_our_next_turn,
+    survival_probabilities,
+)
+
+
+@st.cache_resource
+def _adp_lookup(_ctx):
+    """pool id -> 2026 ADP, resolved once per session."""
+    from ffdraft.draft.rollout import pool_adp_lookup
+
+    return pool_adp_lookup(_ctx.pool, _ctx.adp_table, _ctx.rankings)[0]
 
 
 @st.cache_resource
@@ -65,6 +81,29 @@ def _memoized_recommendation(key, board, ctx):
     t0 = time.perf_counter()
     with st.spinner(f"Simulating ({LIVE_BUDGET.label})…"):
         rows = candidates_to_rows(recommend(board.to_draft_state(), ctx, LIVE_BUDGET))
+
+        # Survival is a separate, much cheaper simulation: only the picks
+        # between now and our next turn, with no season sims behind them.
+        n_picks = picks_until_our_next_turn(
+            board.next_overall_pick, board.n_teams, board.our_team, board.total_picks
+        )
+        if n_picks is None:
+            rows = annotate_rows(rows, {}, has_next_turn=False)
+        else:
+            adp_lookup = _adp_lookup(ctx)
+            survival = survival_probabilities(
+                candidate_ids=[r["player_id"] for r in rows],
+                pool=ctx.pool,
+                adp_by_player_id=adp_lookup,
+                drafted_ids=board.drafted_ids,
+                model=ctx.opponent_model,
+                n_picks=n_picks,
+                n_sims=DEFAULT_N_SIMS,
+                rng=np.random.default_rng(board.next_overall_pick),
+                n_teams=board.n_teams,
+                first_pick=board.next_overall_pick + 1,
+            )
+            rows = annotate_rows(rows, survival, has_next_turn=True)
     memo[key] = (rows, time.perf_counter() - t0)
     return memo[key], False
 
@@ -175,6 +214,14 @@ def main() -> None:
                     "title %": round(r["championship_probability"] * 100, 2),
                     "± SE": round(r["standard_error"] * 100, 2),
                     "gap (pp)": round(r["gap_from_leader_pp"], 2),
+                    "survives %": (
+                        None if r.get("p_survive") is None
+                        else round(r["p_survive"] * 100)
+                    ),
+                    "wait cost (pp)": (
+                        None if r.get("wait_cost_pp") is None
+                        else round(r["wait_cost_pp"], 2)
+                    ),
                     "tied w/ leader": r["indistinguishable_from_leader"],
                 }
                 for r in rows
