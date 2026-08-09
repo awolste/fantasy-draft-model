@@ -121,6 +121,25 @@ Since commit `2b845cc`, lineups are chosen on **projected means** and scored on 
 
 **Known defects and unresolved questions:**
 
+3b. **The opponent model is too random at the top of the board.** `DEFAULT_TEMPERATURE = 3.0` flattens the pick distribution enough that it thinks consensus top-5 players routinely fall to our pick 8. Measured, 1000 sims of the first 7 picks against the live 2026 board:
+
+```
+Jahmyr Gibbs        adp  1.6    survives to 8:  9.2%
+Bijan Robinson      adp  2.0                   14.0%
+Puka Nacua          adp  2.9                   17.5%
+Ja'Marr Chase       adp  3.9                   25.5%
+Christian McCaffrey adp  5.3                   31.1%
+Jonathan Taylor     adp  7.5                   54.5%
+```
+
+In real drafts those top-4 numbers are close to zero — nobody passes on the consensus #1 seven times. **The owner spotted this from a mock-draft roster before it was measured.**
+
+**Why it happens, and why the temperature is not simply "wrong":** 3.0 was chosen to reproduce *aggregate* behaviour across all 180 picks, where reaching and falling genuinely do happen, and it does that well enough that the engine beats ADP in 3 of 5 backtested seasons (§10). But one temperature cannot fit the whole draft: the first five picks are near-deterministic while round 12 is nearly a free-for-all, so a single fitted value necessarily over-randomises the part of the draft with the least real randomness.
+
+**What it does and does not affect.** It does *not* corrupt live recommendations much: on draft day the board is entered from reality, so the opponent model only drives the rollouts *after* our pick, plus the survival column (which will read optimistically early). It **does** make `scripts/mock_draft.py` systematically generous — treat mock rosters as informative about *shape*, never about which specific players you can expect to get.
+
+**The fix is a pick-dependent temperature** — tight early, loose late — refitted against the eight seasons in `league_drafts` and **validated against the backtest**, not tuned until survival percentages look plausible. That is the same class of work as item 3 (a real refit, not a patch), and the same caution applies: this project's history says a change that makes numbers *look* better is exactly the kind that needs a measured gate.
+
 3. **QB=3 and K=2 are cap-bound in every rollout.** The value function still ranks a third QB and second kicker above better alternatives; a policy guard (`MAX_EXTRA_BENCH_NO_FLEX`) is the only thing stopping it. That is masking, not fixing, and costs ~2 roster spots versus opponents' 1.7 QB / 1.2 K. `value.py` has been through three fix rounds; a fourth patch is probably the wrong move — consider whether greedy marginal value is the right policy at all.
 4. **Between-rollout variance appears state-dependent and is unresolved.** Measured 3.50pp at pick 8 (n=50) but 5.97pp in an independent 10-seed check at a different state. The staleness guard catches drift over time but will not tell you the allocation is too tight at some other draft state.
 5. ~~A recommendation costs ~5.6 minutes, too slow for a live draft.~~ **RESOLVED in Stage 4 (§11).** Full budget is now ~197s on native ARM, and the live tool uses a measured reduced budget (12×16×300) costing 35.7s at our worst pick and 13.1s at our last. Precompute was built and dropped after measuring a 9–17% hit rate.

@@ -43,6 +43,7 @@ from ffdraft.live.budget import FULL_BUDGET, LIVE_BUDGET
 from ffdraft.live.cache import candidates_to_rows, recommend, state_key
 from ffdraft.live.context import live_context
 from ffdraft.live.state import DraftBoard
+from ffdraft.live.tiebreak import best_uncapped_available, filter_capped
 from ffdraft.live.survival import (
     DEFAULT_N_SIMS,
     annotate_rows,
@@ -197,6 +198,19 @@ def main() -> None:
             + f" · full budget for reference is {FULL_BUDGET.label}"
         )
 
+        capped_out = filter_capped(rows, board.our_roster_counts)
+        if capped_out:
+            rows = capped_out
+        else:
+            fb = best_uncapped_available(
+                ctx.pool, board.drafted_ids, board.our_roster_counts, _adp_lookup(ctx)
+            )
+            st.warning(
+                "Every simulated candidate is at a position you already have "
+                "enough of (QB≤2, K≤1). Showing the best uncapped player by ADP "
+                "instead — he was **not** simulated, so he has no title equity."
+            )
+            rows = [fb] if fb else rows
         tied = [r for r in rows if r["indistinguishable_from_leader"]]
         if len(tied) > 1:
             names = ", ".join(r["name"] for r in tied)
