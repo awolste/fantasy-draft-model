@@ -38,7 +38,7 @@ Full K and DST scoring rules are in the spec. Two bands are **neutral, not missi
 
 **All four stages are merged and pushed to `origin/main`. 393 tests pass in ~7:30** on the native arm64 venv. See §9/§10 for why the runtime was replaced (open item 8 closed) and §11 for the live assistant.
 
-Stage 3 is **complete**. Task 7, the structure study, is **answered: draft structure does not matter** — 0RB, Hero RB and 2RB:1WR are statistically indistinguishable across 2020–2024. See §7c for the numbers and for the finding that does matter (the early-QB decision).
+Stage 3 is **complete**. Task 7, the structure study, is **answered, in two parts**: among RB/WR orderings draft structure does *not* matter (0RB, Hero RB and 2RB:1WR are statistically indistinguishable), but **taking a QB or elite TE in rounds 1-3 is measurably worse** — 9 of 9 comparisons favour a skill-only start, one at 3.6 sigma. See §7c.
 
 Task 6 (the backtest) is done. Its original verdict was: *the engine loses to naive ADP-following on real 2024 results by 13.5pp ± 1.65pp*. **That verdict has since been overturned — see §7b tests 6-9.** Two things were wrong with it. (a) ~6pp of the deficit was an artifact of the scoring rule: `real_season_champion` set lineups with perfect hindsight, which pays FLEX depth a premium no real manager could collect. That is now fixed. (b) 2024 is the worst of the five usable holdout seasons for this engine. Re-run across 2020–2024 through the fixed production path, **the engine beats ADP in three of five seasons and averages +2.45pp against a between-season SE of 4.27pp** — not broken, but not demonstrated either.
 
@@ -505,6 +505,38 @@ range across seasons (max - min):  0RB 18.00pp   hero_RB 13.25pp
 ```
 
 0RB "wins" 2023 by 11.75pp over 2RB:1WR and *loses* 2024 by 5.25pp. Picking a structure off one season is picking noise.
+
+### Extension (2026-08-09): QB-early and TE-early structures — the tilt is a LEAK
+
+The original study only compared RB/WR orderings, which is why it came back null: Stage 2 had already measured RB and WR starters as worth nearly the same over replacement. It never tested the structures the engine actually *wants* to draft. Three were added and run through the identical harness (N=400/season, 2020–2024, opponents paired by seed):
+
+```
+pooled          rate    between-season SE
+0RB            15.45%         3.89
+2RB_1WR        13.55%         1.76
+engine_free    12.10%         2.94
+hero_RB        11.70%         2.91
+adp            10.10%         0.76
+QB_early        9.60%         1.96      <- QB/RB/WR
+QB_and_TE       8.85%         3.54      <- QB/TE/WR
+TE_early        8.70%         1.41      <- TE/RB/WR
+```
+
+**All 9 skill-vs-QB/TE pairwise comparisons favour the skill-only start.** The strongest:
+
+```
+2RB_1WR - TE_early   +4.85pp  (SE 1.34)   3.6 sigma   <- survives Bonferroni (9 tests, needs ~2.8)
+0RB     - TE_early   +6.75pp  (SE 3.15)   2.1 sigma   <- does NOT survive; discount it
+group mean: skill-only - QB/TE = +4.52pp (SE 3.54)    <- not significant on its own
+```
+
+**Read this honestly.** With 9 comparisons, ~0.5 false positives at 2 sigma are expected, so only the 3.6-sigma result should be leaned on. The group mean is directionally clear but not significant. What raises confidence beyond the arithmetic is that **9 of 9 comparisons point the same way**, and that a **known bias was working in QB_early's favour**: open item 3b means the opponent model lets top-5 players fall to pick 8 far too often, so forcing a QB at the top hands us elite RB/WR afterwards more than reality would. QB_early lost with the scales tipped its way.
+
+**Conclusion: the engine's QB/TE positional tilt is a leak in rounds 1-3, not an edge.** This is the first *direct* measurement of it — every prior signal (§7b's reaching, the late-round candidate lists full of capped positions, the two-TE mock roster) was indirect. Note `engine_free` at 12.10% lands *below* both 0RB and 2RB_1WR precisely because, left alone, the engine sometimes takes the QB or TE it should not.
+
+**Practical guidance, superseding the "no structural rule" reading of §7c for the QB/TE case specifically:** spend the first three picks on RB and WR in whatever order the board offers. Do not take a quarterback or an elite tight end in rounds 1-3. Among RB/WR orderings there is still no measurable difference.
+
+**Caveat that has not gone away:** n = 5 seasons. Per-season swings (0RB ranges 5.25%-25.50%) remain far larger than any between-structure effect, so this is guidance, not a law.
 
 ### The finding that actually matters, and its caveat
 

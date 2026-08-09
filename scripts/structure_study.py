@@ -48,9 +48,20 @@ USABLE_HOLDOUTS = [2020, 2021, 2022, 2023, 2024]
 # The three structures the design doc names, plus an unconstrained engine
 # reference and an ADP-following external reference.
 STRUCTURES: dict[str, tuple[str, ...] | None] = {
+    # The three the design doc named -- measured 2026-08-08, statistically
+    # indistinguishable from each other (HANDOFF 7c).
     "0RB": ("WR", "WR", "WR"),
     "hero_RB": ("RB", "WR", "WR"),
     "2RB_1WR": ("RB", "RB", "WR"),
+    # Added after the RB/WR answer came back null. The original study never
+    # tested taking a QB or an elite TE early -- and that is where the
+    # variance actually is: 7c measured constrained-vs-unconstrained
+    # drafting (effectively "was an early QB taken?") swinging from +15.75pp
+    # to -12.17pp, ten times the structural effect. The engine's QB/TE tilt
+    # is either an edge or a leak, and nothing has measured which.
+    "QB_early": ("QB", "RB", "WR"),
+    "TE_early": ("TE", "RB", "WR"),
+    "QB_and_TE": ("QB", "TE", "WR"),
     "engine_free": None,
 }
 CONTENDERS = (*STRUCTURES, "adp")
