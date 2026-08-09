@@ -1,6 +1,6 @@
 # Handoff — 2026 Fantasy Draft Optimizer
 
-**Last updated:** 2026-08-08
+**Last updated:** 2026-08-09
 **Repo:** https://github.com/awolste/fantasy-draft-model (public)
 **Read this first**, then `docs/superpowers/specs/2026-08-02-ff-draft-2026-design.md` for the design and `docs/superpowers/plans/README.md` for the stage roadmap and the running constraints list.
 
@@ -34,9 +34,9 @@ Full K and DST scoring rules are in the spec. Two bands are **neutral, not missi
 | 1 | Data foundation | **Complete**, merged to `main` |
 | 2 | Player + season model | **Complete**, merged to `main` |
 | 3 | Opponent model + optimizer | **Complete (7 of 7)**, merged to `main` |
-| 4 | Live draft assistant | **Complete** (live-only; precompute measured and dropped, §11) |
+| 4 | Live draft assistant | **Complete** (live-only; + survival columns, position caps, scarcity tie-break) |
 
-**All four stages are merged and pushed to `origin/main`. 393 tests pass in ~7:30** on the native arm64 venv. See §9/§10 for why the runtime was replaced (open item 8 closed) and §11 for the live assistant.
+**All four stages are merged and pushed to `origin/main`. 421 tests pass in ~7:40** on the native arm64 venv. See §9/§10 for why the runtime was replaced (open item 8 closed) and §11 for the live assistant.
 
 Stage 3 is **complete**. Task 7, the structure study, is **answered, in two parts**: among RB/WR orderings draft structure does *not* matter (0RB, Hero RB and 2RB:1WR are statistically indistinguishable), but **taking a QB or elite TE in rounds 1-3 is measurably worse** — 9 of 9 comparisons favour a skill-only start, one at 3.6 sigma. See §7c.
 
@@ -112,12 +112,11 @@ Since commit `2b845cc`, lineups are chosen on **projected means** and scored on 
 
 ## 7. Open items
 
-**Blocking the headline deliverable:**
+**Nothing is blocking a deliverable. Stages 1-4 are complete, merged and pushed.**
 
-1. **Task 6 — the backtest has been run. Original verdict ("the engine loses by 13.5pp") is OVERTURNED; see §7b tests 6-8 and the note in §3.** Multi-season ex-ante result: engine beats ADP in 3 of 5 holdouts, pooled +2.20pp ± 4.06pp. The text below is kept for the leakage audit and the original measurement, but its conclusion is superseded.** `scripts/backtest.py` / `src/ffdraft/backtest.py`. Full leakage audit passed (every fitted component checked against seasons through 2023 only; see `tests/test_backtest.py::test_fit_report_seasons_never_include_the_holdout_season`). N=600 draft realizations, same-seed paired comparison: **engine 3.00% ± 0.70% SE vs. ADP-baseline 16.50% ± 1.52% SE — engine minus ADP = −13.50pp ± 1.65pp SE**, an ~8-sigma deficit, not noise. Random-legal scored 0.00%, so the engine barely clears a policy with no skill at all. The gap concentrates in rounds 3–6 (mean real-2024 points-per-game of our picks there trails ADP's picks at the same slot by 2-3 ppg; picks 1-2 are roughly at parity or slightly ahead). **Do not treat the engine as validated.** Diagnosis is under way — see §7b below for what has already been ruled out.
-1b. **Diagnosis has advanced substantially (tests 3-6, §7b).** ~6pp of the deficit is now shown to be a *scoring-rule artifact*: `real_season_champion` sets lineups with perfect hindsight, which pays FLEX depth a premium no manager could collect. `real_season_champion` should be treated as defective for comparing rosters of different shapes, and fixing it is a well-specified task. The remaining ~9.25pp is real and unexplained; the evidence now points at the **replacement means**, QB first. See the end of §7b.
+1. ~~Task 6: the engine loses the backtest by 13.5pp.~~ **RESOLVED — the verdict was wrong.** ~6pp was a hindsight-scoring artifact (now fixed) and 2024 was the worst of five usable holdouts. Multi-season, ex-ante, through the production path: **engine − ADP = +2.86pp, between-season SE 4.15pp, beating ADP in 3 of 5 seasons.** Not broken; not demonstrated either. §7b tests 6-9, §10.
 
-2. **Task 7 — the structure study has not been run.** It is no longer blocked on "the engine is broken" (§7b test 8 overturned that), but it should still wait for the two fixes listed at the end of §7b — ex-ante lineup scoring and replacement-level uncertainty — because its answer is conditional on how the QB tilt is sized. It would play out each structure using a policy known to lose to ADP by 14pp, so any answer would be an artifact of a broken drafter rather than a fact about roster construction. 0RB vs Hero RB vs 2RB:1WR from slot 8, with error bars. Structures currently differentiate only modestly in position counts (0RB ends RB3/WR8, 2RB ends RB4/WR7) but differ substantially in player quality, which is what the comparison measures. Given RB≈WR over replacement, **be suspicious of any large structural edge** and investigate before believing it.
+2. ~~Task 7: the structure study has not been run.~~ **RESOLVED, in two parts.** Among RB/WR orderings, structure does not matter (all pairwise gaps ≤1.75pp against SEs of 1.4-2.9). But **taking a QB or elite TE in rounds 1-3 is measurably worse** — 9 of 9 comparisons favour a skill-only start, strongest at 3.6 sigma. §7c and its 2026-08-09 extension.
 
 **Known defects and unresolved questions:**
 
@@ -143,9 +142,9 @@ In real drafts those top-4 numbers are close to zero — nobody passes on the co
 3. **QB=3 and K=2 are cap-bound in every rollout.** The value function still ranks a third QB and second kicker above better alternatives; a policy guard (`MAX_EXTRA_BENCH_NO_FLEX`) is the only thing stopping it. That is masking, not fixing, and costs ~2 roster spots versus opponents' 1.7 QB / 1.2 K. `value.py` has been through three fix rounds; a fourth patch is probably the wrong move — consider whether greedy marginal value is the right policy at all.
 4. **Between-rollout variance appears state-dependent and is unresolved.** Measured 3.50pp at pick 8 (n=50) but 5.97pp in an independent 10-seed check at a different state. The staleness guard catches drift over time but will not tell you the allocation is too tight at some other draft state.
 5. ~~A recommendation costs ~5.6 minutes, too slow for a live draft.~~ **RESOLVED in Stage 4 (§11).** Full budget is now ~197s on native ARM, and the live tool uses a measured reduced budget (12×16×300) costing 35.7s at our worst pick and 13.1s at our last. Precompute was built and dropped after measuring a 9–17% hit rate.
-6. **Test suite takes ~12 minutes**, roughly quadrupled because the pick-8/pick-13 real-data tests use full production budgets. Consider pinning a smaller explicit budget in those two tests.
+6. **Test suite takes ~7:40** for 421 tests (was ~12 min under Rosetta). Still dominated by the pick-8/pick-13 real-data tests running full production budgets; pinning a smaller explicit budget there is still worth doing.
 7. **`sources/nflverse.py` imports `models/kicking.py`** — a Stage 1 → Stage 2 layering inversion. Cheap to fix by moving `kicking.py` beside `scoring.py`.
-8. **Python runs under Rosetta x86-64 emulation**, not native ARM, and this still causes intermittent native crashes. `polars[rtcompat]` (§9) reduced but did **not eliminate** them: after installing it, a full `pytest` run died with a native fault dump, and two subsequent identical runs passed 362/362. `pytest-randomly` is not installed, so this is not test-order dependence — it is plain intermittency, roughly 1 in 3 observed. **Switching to a native ARM Python is now the top infrastructure priority**, not a nice-to-have: it removes Rosetta from the picture instead of patching around it. Until then, treat a single green suite as weak evidence and re-run before trusting a release. Never set `POLARS_SKIP_CPU_CHECK=1`.
+8. ~~Python runs under Rosetta x86-64 emulation.~~ **RESOLVED 2026-08-08.** Native arm64 CPython 3.11.15 installed via `uv python install cpython-3.11-macos-aarch64-none`; `.venv` is now native and the x86_64 one is deleted. Suite went 11:30 → ~7:40, and the intermittent native crashes and silent numeric corruption are gone (§10b, §10c). Never set `POLARS_SKIP_CPU_CHECK=1`.
 
 8b. **Beware `cmd | tail` when checking exit codes.** A crashed `pytest` piped through `tail` reported **exit 0**, because a pipeline's status is the last command's. This nearly caused a segfaulting suite to be merged to `main` on a false green. Redirect to a file and check `$?` directly. Also note backgrounded commands start from the session cwd, so a `cd` in a *previous* tool call does not apply — one such run failed with exit 127 while still printing a success-looking line.
 9. **`data/manager_labels.csv` is filled in** with real manager names (gitignored). Never read, print, or commit it.
@@ -606,7 +605,7 @@ Caches are fingerprinted against their inputs and **raise `CacheStaleError`** if
 - Findings that change a documented number get written back into `docs/superpowers/plans/README.md` so they survive the session.
 - Numbers reported by subagents are spot-checked against raw data before being believed. This has caught real errors more than once, including one where the coordinator's own first check used the wrong baseline and nearly flagged a correct model as broken.
 
-## 9. Environment: Polars was running unsound, and this is now fixed
+## 10b. Environment: Polars was running unsound — RESOLVED
 
 **Found 2026-08-04, and it invalidates nothing measurably but could have.**
 
@@ -627,7 +626,7 @@ The venv Python is **x86_64 running under Rosetta on an Apple M1 Pro**. Polars' 
 
 **Still worth doing:** switch to a native ARM Python (open item 8). `rtcompat` makes the current setup correct; a native build would make it correct *and* substantially faster, which matters given the suite already takes ~12 minutes.
 
-## 10. The runtime can produce silently WRONG NUMBERS, not just crashes
+## 10c. The runtime could produce silently WRONG NUMBERS — RESOLVED
 
 **Found 2026-08-04, immediately after §9. This is the most serious open issue in the project and it outranks every modelling question below it.**
 
@@ -797,3 +796,59 @@ Only the two live sources moved (FantasyPros −2 ranked players, FFC +10 in 202
 ### Note on document dates
 
 Stage 4's spec, plan and several §-headers are dated **2026-08-04**; the actual date was **2026-08-08**. A session-start hook reported the earlier date and it was taken at face value. Filenames are left alone to avoid breaking links — treat every "2026-08-04" in Stage 4 material as 2026-08-08.
+
+## 13. Session log — 2026-08-08/09
+
+The session that took the project from "Stage 3 incomplete, engine apparently broken" to all four stages complete and pushed. Recorded because most of the value was **negative results and overturned conclusions**, which are the easiest things for a future reader to re-derive by accident.
+
+### What was overturned
+
+| Was believed | Now known |
+|---|---|
+| The engine loses to ADP by 13.5pp; do not trust it | ~6pp was a scoring artifact, and 2024 was the worst of 5 seasons. Multi-season: **+2.86pp ± 4.15pp, 3 of 5** |
+| Hindsight lineup-setting costs ≤2.5pp | For a *depth-stacked* roster it is worth **5.75pp**, and it silently decided the backtest |
+| The QB tilt might be an edge (6-pt passing TDs) | Directly measured: taking QB/TE in rounds 1-3 is a **leak** — 9 of 9 comparisons favour skill-only, one at 3.6σ |
+| "Size the QB bet down" (reasoning, §7c) | Swept it: mean *falls* monotonically as the tilt shrinks. Superseded — see §10c |
+| Precompute + live fallback is the right architecture | Built it, measured a **9-17% hit rate**, dropped it. Live-only |
+| `rtcompat` fixed the Polars instability | It did not. Native ARM did |
+
+### Decisions made, with their reasons
+
+- **Survival is displayed, never blended into the ranking.** Championship probability is meant to *be* the objective; survival is a correction for a defect in how it is computed. A weighted blend would need an invented weight between quantities sharing no units, and would bury the defect behind a knob. `wait_cost_pp` expresses the combination in real units instead.
+- **Manual pick entry, no ESPN polling** (owner). Cannot silently desync mid-draft.
+- **Ranking is never silently re-sorted** on any unvalidated score. Caps and tie-breaks change the *choice set*, not the model's ordering.
+- **An unsimulated pick carries `championship_probability = None`**, not 0.0. It crashed the mock's logging on first use — the correct failure mode. A 0.0 default would have displayed a fabricated title equity.
+- **Aliases key on full names, never first-name tokens.** `kenny → kenneth` would rewrite Kenny Pickett and Kenny Golladay; merging two real players is the Marvin Harrison Jr./Sr. class of bug.
+
+### Defects found by looking at output, not by reading code
+
+Every one produced plausible, non-crashing, wrong results:
+
+1. **Hindsight lineups** — worth 5.75pp to depth-stacked rosters, 0 to ours. Found by comparing roster *shapes*.
+2. **Rosetta/Polars silent corruption** — identical code returned 5.33% once and ~17% every other time. Found because a control arm disagreed with a known value.
+3. **`filter_capped` disabling itself** — its "never return nothing" fallback returned capped rows, and by the late rounds *everything* is capped. Found in a mock roster with 4 QBs.
+4. **My own tie-break causing a R9 kicker** — roster "need" overrode a 100%-survival signal. Found in a mock roster.
+5. **`validate_cache_key.py` reporting "OK — 3/3"** while its own output said the key had moved on every trial. It validated nothing and said the opposite.
+6. **HTTP 200 from a dead Streamlit app** — the server booted, the script had crashed on a relative import. Renders client-side, so status proved nothing.
+7. **u32 underflow** in an ad-hoc rank-gap analysis — `-1` printed as 4294967295, inverting the sort.
+8. **Nickname mismatches** silently excluding draftable players (Gainwell rank 96, Okonkwo 144) from the pool *and* from being enterable.
+
+### Owner observations that drove real fixes
+
+Three defects were found by the owner reading a mock roster, not by any automated check:
+
+- *"recommending players a couple rounds before they go"* → led to the survival column and, ultimately, to measuring the QB/TE tilt as a leak.
+- *"why would we draft 2 high TEs?"* → the two-TE build; now measured as costing 4.85pp vs 2RB:1WR.
+- *"Chase will almost certainly not be available at 8"* → open item 3b, the opponent-model temperature.
+
+**The lesson worth keeping: the model cannot audit its own priors. Domain review of concrete output found things 421 tests did not.**
+
+### Current open items, in priority order
+
+1. **Item 3 — the QB/TE tilt in `value.py`'s replacement levels.** Now the highest-value fix, and no longer speculative: measured at 4.85pp (3.6σ) in rounds 1-3, and it is also why late-round candidate lists fill with capped positions. Caps and tie-breaks contain symptoms only.
+2. **Item 3b — pick-dependent opponent-model temperature.** Refit against `league_drafts`, validate against the backtest, do not tune until survival numbers look plausible.
+3. **Item 4** — state-dependent between-rollout variance.
+4. **Item 6** — pin smaller budgets in the two slow real-data tests.
+5. **Item 7** — `sources/nflverse.py` → `models/kicking.py` layering inversion.
+6. **Replacement-level uncertainty** — the experiment whose rationale was retracted (§10c). Run it with no predicted direction, or drop it.
+7. **Three players remain unmatched** (Tommy Myers, Jordan Waters, Elijah Tau-Tolliver), all rank 441+. Genuinely absent from nflverse; no alias helps. If one is drafted, **they cannot be entered** and the board will drift. The owner declined the UI escape hatch that would fix this.
