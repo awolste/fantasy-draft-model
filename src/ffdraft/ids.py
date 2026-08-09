@@ -19,12 +19,42 @@ CROSSWALK_COLUMNS = ("gsis_id", "espn_id", "sleeper_id", "name", "position")
 _SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
 
 
+# Ranking sources list players under nicknames; nflverse's crosswalk uses
+# legal names. Unmatched players are excluded from the pool entirely (see
+# `models.distribution.build_player_pool`), so a nickname mismatch silently
+# costs a draftable player -- and in the live tool it means that player
+# cannot even be *entered* when an opponent drafts him.
+#
+# Keyed on the FULL normalised name, deliberately, never on a first-name
+# token: aliasing "kenny" -> "kenneth" would rewrite Kenny Pickett and Kenny
+# Golladay too, and merging two real players is the same class of bug as the
+# Marvin Harrison Jr./Sr. join fan-out this project already hit.
+#
+# Every entry below was checked against the crosswalk: the target exists and
+# the source does not, so no alias can create a duplicate (`_key`, position)
+# pair and trip `match_by_name`'s cardinality guard. Verify that before
+# adding one.
+_NAME_ALIASES: dict[str, str] = {
+    "kenny gainwell": "kenneth gainwell",
+    "chig okonkwo": "chigoziem okonkwo",
+    "hollywood brown": "marquise brown",
+    "mitch tinsley": "mitchell tinsley",
+}
+
+
 def normalize_name(name: str) -> str:
-    """Lowercase, strip punctuation and generational suffixes, squash spaces."""
+    """Lowercase, strip punctuation and generational suffixes, squash spaces,
+    then apply the nickname alias table.
+
+    Aliasing happens here rather than at a single call site so both sides of
+    every name join canonicalise identically -- rankings, ADP and the
+    crosswalk all pass through this function.
+    """
     cleaned = name.lower().replace("-", " ")
     cleaned = re.sub(r"[^a-z\s]", "", cleaned)
     tokens = [t for t in cleaned.split() if t and t not in _SUFFIXES]
-    return " ".join(tokens)
+    key = " ".join(tokens)
+    return _NAME_ALIASES.get(key, key)
 
 
 def _with_key(df: pl.DataFrame) -> pl.DataFrame:

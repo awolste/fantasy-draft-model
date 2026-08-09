@@ -199,3 +199,44 @@ def test_match_by_name_output_height_matches_input_height():
     })
     out = match_by_name(names, crosswalk)
     assert out.height == names.height
+
+
+# ---------------------------------------------------------------------------
+# Nickname aliases
+
+
+def test_alias_maps_a_ranking_nickname_onto_the_crosswalk_legal_name():
+    """FantasyPros ranks players under nicknames; nflverse uses legal names.
+    Both sides must normalise to the same key or the player is dropped from
+    the pool entirely."""
+    from ffdraft.ids import normalize_name
+
+    assert normalize_name("Kenny Gainwell") == normalize_name("Kenneth Gainwell")
+    assert normalize_name("Chig Okonkwo") == normalize_name("Chigoziem Okonkwo")
+    assert normalize_name("Hollywood Brown") == normalize_name("Marquise Brown")
+    assert normalize_name("Mitch Tinsley") == normalize_name("Mitchell Tinsley")
+
+
+def test_aliases_match_on_the_full_name_never_a_bare_first_name():
+    """Aliasing the first-name token alone would rewrite every unrelated
+    'Kenny' or 'Mitch' and could collide two real players -- the same class
+    of bug as the Marvin Harrison Jr./Sr. join fan-out."""
+    from ffdraft.ids import normalize_name
+
+    assert normalize_name("Kenny Pickett") == "kenny pickett"
+    assert normalize_name("Mitch Trubisky") == "mitch trubisky"
+    assert normalize_name("Kenny Golladay") == "kenny golladay"
+
+
+def test_alias_is_idempotent_so_normalising_twice_is_safe():
+    from ffdraft.ids import normalize_name
+
+    once = normalize_name("Hollywood Brown")
+    assert normalize_name(once) == once
+
+
+def test_unaliased_names_are_unchanged():
+    from ffdraft.ids import normalize_name
+
+    assert normalize_name("Ja'Marr Chase") == "jamarr chase"
+    assert normalize_name("Bijan Robinson") == "bijan robinson"
