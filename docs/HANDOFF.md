@@ -537,6 +537,34 @@ group mean: skill-only - QB/TE = +4.52pp (SE 3.54)    <- not significant on its 
 
 **Caveat that has not gone away:** n = 5 seasons. Per-season swings (0RB ranges 5.25%-25.50%) remain far larger than any between-structure effect, so this is guidance, not a law.
 
+### Resolution (2026-08-09): the tilt is real, localised — and neither fix wins
+
+`scripts/diagnose_tilt.py` **localised the mechanism**, which nothing before it had done. `draft.value` prices candidates against the **waiver** replacement level — what a slot is worth if you never draft anyone there at all. But we hold 18 picks and always fill every slot, so the real fallback for passing on a player is *the best one still on the board when we get round to it*. That gap is not uniform across positions, which is why it shows up as a positional tilt rather than a harmless constant:
+
+```
+pick  pos     VOR    true cost of waiting
+   8  QB     9.19            0.00     <- Allen is still there at pick 33
+   8  TE     8.35            0.00     <- McBride too
+   8  RB     7.60            0.95
+  13  RB     6.65            3.73
+```
+
+Top 40 by `draft.value`: **QB 6, TE 4**. By ADP: **QB 1, TE 1**. The engine takes a mean of **1.32 QB/TE in rounds 1-3**.
+
+`scripts/measure_tilt_fix.py` then tested two fixes, N=300/season, 2020-2024, paired by seed. **Both failed and `value.py` was left unchanged:**
+
+```
+paired vs engine:  baseline -4.40pp (SE 2.06, 2.1 sigma)   <- harmful, lost all 5 seasons
+                   guard    +0.47pp (SE 3.18, 0.1 sigma)   <- nothing
+```
+
+- **`baseline`** replaced the waiver level with the "last starter drafted" level. Principled, and it *lost every season*. (It also raises the share of players priced at exactly 0.00 from 68% to 83%, so late rounds decay toward arbitrary tie-breaks.) Not in `src/` — it lives in the script that measured it.
+- **`guard`** banned QB/TE from rounds 1-3, the fix the 3.6σ structure result appears to support. It swings **−11.00pp (2022) to +7.33pp (2023)** and averages to nothing.
+
+**2022 is the tell.** It has the *most* early QB/TE picks (1.60) and the guard's *worst* season, because 2022 is when QB replacement bottomed at 16.36 and the early quarterback genuinely paid. **A rounds-1-3 ban is a bet on how good streamable QBs turn out to be that year — not knowable on draft day.** This is §7c's own wall, now confirmed against the engine's free choices rather than against forced structures.
+
+**Do not re-read the 4.85pp headline as available upside.** It is measured against a *forced* TE-first structure. Unforced, `engine_free` − `2RB_1WR` is ~1.45pp and inside noise. The ceiling was always small.
+
 ### The finding that actually matters, and its caveat
 
 The largest effects in this table are not between structures at all — they are between **constrained and unconstrained** drafting, and they run in opposite directions in different seasons:
@@ -707,13 +735,17 @@ Now trustworthy (control arm verified above). N=300/season, 2020–2024. `delta`
 
 **Sizing the QB bet down does not help, and §7c's recommendation to do so is not supported.** The mean *falls* monotonically as the tilt is reduced (11.47 → 9.27), while the season-to-season spread also falls (sd 7.73 → 4.07). It is an ordinary risk/return trade, with no delta that improves both.
 
+> **The conclusion survives; this argument for it does not (added 2026-08-09).** Read the `mean QB drafted` column: it goes **3.00 → 0.48**. At the large deltas the engine fields *no quarterback at all*, so those arms lose because of an empty starting slot, not because the tilt was removed. The experiment confounds "don't take a QB early" with "don't take a QB". It also corrects one position in isolation, leaving TE inflated — which moves the tilt rather than removing it. Do not cite this table as evidence that the tilt is harmless or that `value.py` should not be touched; for that, cite §7c's resolution, which tested a coherent, all-position correction and a rounds-1-3 timing guard and found both wanting.
+
 **The decisive argument is that the variance reduction is not worth buying.** You draft *once*. For a single season, the objective is expected championship probability, and `delta=0` maximises it. Between-season spread here is not diversifiable risk — it is uncertainty about which kind of season you will get, and shrinking it lowers the expectation without protecting anything you can bank.
 
 **Honest caveat: none of the mean differences are significant.** With 5 seasons the between-season SE is ~3.5pp, so 11.47 vs 9.67 is well inside noise. The *variance* ordering is the more credible signal, and it is the one that does not matter for a one-shot draft. The defensible reading is **"no evidence that shrinking the QB tilt helps; mild evidence it costs"** — so leave the value function alone.
 
 This supersedes §7c's closing recommendation, which was reasoning rather than measurement. The reasoning was plausible and the measurement disagrees; the measurement wins.
 
-`scripts/qb_tilt_sweep.py` is committed and its mechanism is verified (raising QB replacement does reduce QB count: 3.00 → 1.75 at delta=2.15 on 2024). **Its five-season results are void** and are deliberately not recorded here. Re-run it on a native ARM Python before drawing any conclusion about whether to size the QB bet down. The question from §7c remains open.
+`scripts/qb_tilt_sweep.py` is committed and its mechanism is verified (raising QB replacement does reduce QB count: 3.00 → 1.75 at delta=2.15 on 2024).
+
+*(Stale paragraph removed 2026-08-09: it said the five-season results were void pending a native-ARM re-run, directly contradicting the table above, which **is** that re-run. The table stands; only the argument drawn from it is confounded — see the note under it.)*
 
 ## 11. Stage 4 — the live assistant, and why precompute was dropped
 
@@ -845,8 +877,8 @@ Three defects were found by the owner reading a mock roster, not by any automate
 
 ### Current open items, in priority order
 
-1. **Item 3 — the QB/TE tilt in `value.py`'s replacement levels.** Now the highest-value fix, and no longer speculative: measured at 4.85pp (3.6σ) in rounds 1-3, and it is also why late-round candidate lists fill with capped positions. Caps and tie-breaks contain symptoms only.
-2. **Item 3b — pick-dependent opponent-model temperature.** Refit against `league_drafts`, validate against the backtest, do not tune until survival numbers look plausible.
+1. ~~**Item 3 — the QB/TE tilt in `value.py`'s replacement levels.**~~ **CLOSED 2026-08-09 — mechanism localised, two fixes measured, neither works.** See §7c "Resolution". The tilt is real (top-40: QB 6/TE 4 vs ADP's 1/1) and its cause is now known (the waiver baseline prices a slot as if it will never be drafted). But a coherent all-position correction loses 4.40pp (2.1σ) and a rounds-1-3 QB/TE ban is 0.1σ while swinging ±11pp by season. **`value.py` is unchanged and should stay that way absent new evidence.** Anyone reopening this needs a fix that does *not* amount to a fixed bet on that season's QB streaming quality — that is the part the data says is unknowable at draft time. Do not re-run the §10c delta sweep; it is confounded (see the note there).
+2. **Item 3b — pick-dependent opponent-model temperature.** Refit against `league_drafts`, validate against the backtest, do not tune until survival numbers look plausible. **Now the highest-value open item**, and it also biases everything above: the opponent model lets top-5 players fall to pick 8 too often, which flatters early-QB/TE structures in every measurement on this page.
 3. **Item 4** — state-dependent between-rollout variance.
 4. **Item 6** — pin smaller budgets in the two slow real-data tests.
 5. **Item 7** — `sources/nflverse.py` → `models/kicking.py` layering inversion.
