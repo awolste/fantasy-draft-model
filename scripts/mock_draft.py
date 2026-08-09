@@ -95,6 +95,7 @@ def main() -> None:
                     ],
                     counts,
                     opp_rng,
+                    round_=board.current_round,
                 )
                 counts[ctx.pool[pid].position] = counts.get(ctx.pool[pid].position, 0) + 1
             board.record(pid, ctx.pool[pid].position)

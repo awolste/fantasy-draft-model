@@ -544,14 +544,95 @@ def build_pool_adp_lookup(
 # units `reach` itself uses (see module docstring), then converted once to
 # a plain, interpretable "how many rank-positions apart" scale. A
 # temperature of 3.0 means two players three ranks apart on the manager's
-# adjusted board are about e:1 (~2.7x) more/less likely -- concentrated
-# enough that the top few adjusted-ranked players dominate (matching how
-# real drafts are heavily front-loaded on consensus value) while still
-# leaving room for the model to be wrong. Chosen by a small grid search
-# against the 2024 holdout backtest (see `models/opponent.py`'s report /
-# `scripts/backtest_opponent.py`); not fit jointly with the reach model
-# itself, to keep the two fits independent and inspectable.
-DEFAULT_TEMPERATURE: float = 3.0
+# adjusted board are about e:1 (~2.7x) more/less likely.
+#
+# **Superseded 2026-08-09 by `TEMPERATURE_BY_ROUND`; retained only so
+# `scripts/compare_league_wide.py` can still reproduce the pre-schedule
+# numbers it was run to produce.** Do not use it for new work: a single
+# temperature is wrong in both directions at once (see below).
+LEGACY_FLAT_TEMPERATURE: float = 3.0
+DEFAULT_TEMPERATURE: float = LEGACY_FLAT_TEMPERATURE  # backwards-compatible alias
+
+# Temperature rises steeply through the draft: round 1 is near-consensus
+# (everyone agrees who the best player is) while round 15 is idiosyncratic.
+# One flat number could not represent both, and was measurably wrong at
+# each end (`scripts/diagnose_temperature.py`, against 7 real drafts):
+#
+#     best-available ADP rank   pick 8:  real  5.1  vs flat-3.0  4.2
+#                               pick 48: real 32.1  vs flat-3.0 41.6
+#
+# i.e. too random early (elite players surviving to our pick that never
+# survived in reality) *and* too rigid late (burning through good players
+# faster than real managers do). Lowering the flat value fixes the first
+# and worsens the second.
+#
+# Fit by maximum likelihood per round over all 1,125 usable picks in
+# `TRAINING_SEASONS` (`scripts/fit_temperature.py`), holding the reach
+# model and `roster_decay` fixed so this cannot absorb a misfit from
+# either. Validated leave-one-season-out: held-out log-likelihood improves
+# by +1.72/pick and is better in **7 of 7 seasons**.
+#
+# Two honest caveats, both measured:
+#
+# * Nearly all of that +1.72 comes from late rounds. Restricted to rounds
+#   1-3 -- the only picks this tool actually advises on -- the gain is
+#   +0.065/pick (SE 0.022), better in 6 of 7 seasons. Real, but small.
+# * Top-1 accuracy is slightly *worse* (-0.45pp), which is the criterion
+#   the flat 3.0 was originally tuned on. That criterion is the wrong one
+#   here: rollouts **sample** from this distribution rather than taking its
+#   argmax, so calibration is what matters and point accuracy is not.
+#
+# A linear form (T = 1.95 + 1.16*round) fits the late rounds equally well
+# and was rejected: its intercept lands at T(1) = 3.11, outside round 1's
+# own 95% confidence interval of [1.85, 2.90], so it is significantly
+# wrong exactly at our first pick. The per-round table generalised just as
+# well out of sample (+1.72 vs +1.73/pick), so nothing was bought by the
+# smoother form.
+#
+# Values are the raw per-round MLE and are **not** perfectly monotone
+# (rounds 4-5 and 14-16 dip slightly). Theory says temperature should rise
+# monotonically; those dips are sampling noise at ~70 picks per round.
+# They are left unsmoothed because smoothing them changed nothing
+# measurable, and an unsmoothed fit is easier to re-derive and check.
+TEMPERATURE_BY_ROUND: Mapping[int, float] = MappingProxyType({
+    1: 2.30, 2: 4.20, 3: 4.90, 4: 6.95, 5: 6.90, 6: 12.00,
+    7: 11.00, 8: 12.00, 9: 11.50, 10: 12.50, 11: 12.50, 12: 15.00,
+    13: 17.50, 14: 20.50, 15: 19.50, 16: 17.50, 17: 24.00,
+})
+
+_DEEPEST_FITTED_ROUND: int = max(TEMPERATURE_BY_ROUND)
+
+
+def temperature_for_round(round_: int) -> float:
+    """The fitted softmax temperature for a 1-indexed draft round.
+
+    Rounds past the deepest fitted one reuse that round's value rather than
+    extrapolating: round 18 exists only in this league's 2023+ drafts and
+    has too few training picks to fit its own temperature, and by then the
+    board is flat enough that the distinction is immaterial. Extrapolating
+    a trend off the end of the data would be inventing a number.
+    """
+    if round_ < 1:
+        raise ValueError(f"round_ must be 1-indexed and positive, got {round_}")
+    return TEMPERATURE_BY_ROUND[min(round_, _DEEPEST_FITTED_ROUND)]
+
+
+def _resolve_temperature(temperature: float | None, round_: int | None) -> float:
+    """Either an explicit temperature or the fitted one for `round_`.
+
+    Raises when given neither, rather than quietly falling back to the
+    superseded flat 3.0 -- a caller that forgot to thread the round through
+    would otherwise get plausible-looking output from the very model this
+    schedule was written to replace.
+    """
+    if temperature is not None:
+        return temperature
+    if round_ is None:
+        raise ValueError(
+            "pass either an explicit `temperature` or the `round_` to look one "
+            "up for -- see TEMPERATURE_BY_ROUND for why there is no flat default"
+        )
+    return temperature_for_round(round_)
 
 # Each already-rostered player at a position multiplies that position's
 # sampling weight by this factor for the *next* pick at that position --
@@ -583,8 +664,9 @@ def pick_probabilities(
     manager_id: str,
     available: Sequence[AvailablePlayer],
     roster_counts: Mapping[str, int] = _EMPTY_ROSTER_COUNTS,
-    temperature: float = DEFAULT_TEMPERATURE,
+    temperature: float | None = None,
     roster_decay: float = DEFAULT_ROSTER_DECAY,
+    round_: int | None = None,
 ) -> dict[str, float]:
     """`P(manager_id drafts p)` for each `p` in `available`, given the
     manager's current `roster_counts` (`{position: count}`).
@@ -607,8 +689,14 @@ def pick_probabilities(
     1 = the most-wanted player still on the board) and a softmax over
     `-rank/temperature` converts ranks to probabilities.
     Rank space (not raw adjusted-value space) is used for the softmax so
-    `temperature` means the same thing regardless of what round of the
-    draft this is -- see `DEFAULT_TEMPERATURE`.
+    `temperature` means the same thing regardless of the size of the
+    remaining board -- see `TEMPERATURE_BY_ROUND`.
+
+    **Temperature comes from the fitted per-round schedule unless one is
+    passed explicitly.** Give `round_` (1-indexed) and leave `temperature`
+    as `None` for normal use; pass an explicit `temperature` only to pin a
+    value (tests, and the sweeps that measured this). Passing neither
+    raises rather than silently reinstating the superseded flat 3.0.
 
     That rank-based weight is then multiplied by a per-position roster-need
     penalty, `roster_decay ** roster_counts.get(position, 0)` (floored at
@@ -622,6 +710,7 @@ def pick_probabilities(
     if not available:
         return {}
 
+    temperature = _resolve_temperature(temperature, round_)
     n = len(available)
     adp = np.empty(n)
     positions: list[str] = []
@@ -669,8 +758,9 @@ def sample_pick(
     available: Sequence[AvailablePlayer],
     roster_counts: Mapping[str, int],
     rng: np.random.Generator,
-    temperature: float = DEFAULT_TEMPERATURE,
+    temperature: float | None = None,
     roster_decay: float = DEFAULT_ROSTER_DECAY,
+    round_: int | None = None,
 ) -> str:
     """Draw one `player_id` from `pick_probabilities`'s distribution using
     `rng` (an explicit `np.random.Generator` -- never global numpy state,
@@ -680,7 +770,7 @@ def sample_pick(
         raise ValueError("sample_pick called with no available players")
 
     probs_by_id = pick_probabilities(
-        model, manager_id, available, roster_counts, temperature, roster_decay
+        model, manager_id, available, roster_counts, temperature, roster_decay, round_
     )
     player_ids = list(probs_by_id.keys())
     probs = np.array([probs_by_id[pid] for pid in player_ids])
@@ -755,7 +845,7 @@ def backtest_holdout_season(
     league_managers: pl.DataFrame | None = None,
     crosswalk: pl.DataFrame | None = None,
     adp_history: pl.DataFrame | None = None,
-    temperature: float = DEFAULT_TEMPERATURE,
+    temperature: float | None = None,
     roster_decay: float = DEFAULT_ROSTER_DECAY,
 ) -> BacktestResult:
     """Fit `OpponentModel` on every `TRAINING_SEASONS` season *except*
@@ -836,7 +926,8 @@ def backtest_holdout_season(
 
         if available and actual_in_pool:
             probs = pick_probabilities(
-                model, manager_id, available, counts, temperature, roster_decay
+                model, manager_id, available, counts, temperature, roster_decay,
+                round_=row["round"],
             )
             ranked = sorted(probs.items(), key=lambda kv: -kv[1])
             top1_ids = {ranked[0][0]} if ranked else set()

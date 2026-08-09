@@ -745,6 +745,7 @@ def test_structure_smoke_0rb_vs_2rb_produce_different_final_shapes(real_fixtures
                 cands = [AvailablePlayer(player_id=p, position=pool[p].position, adp=adp_lookup[p]) for p in avail]
                 pid = sample_pick(
                     model, manager_id=f"slot_{team}", available=cands, roster_counts={}, rng=rng,
+                    round_=(nxt - 1) // n_teams + 1,
                 )
             pos = pool[pid].position
             picks.append(Pick(overall_pick=nxt, team=team, player_id=pid, position=pos))

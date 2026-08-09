@@ -311,14 +311,14 @@ def test_pick_probabilities_only_returns_available_players():
         AvailablePlayer("p2", "WR", 8.0),
         AvailablePlayer("p3", "QB", 20.0),
     ]
-    probs = pick_probabilities(model, "mgr-unknown", available)
+    probs = pick_probabilities(model, "mgr-unknown", available, round_=1)
     assert set(probs.keys()) == {"p1", "p2", "p3"}
 
 
 def test_pick_probabilities_sum_to_one_and_nonnegative():
     model = _model_no_effects()
     available = [AvailablePlayer(f"p{i}", "RB", float(i + 1)) for i in range(25)]
-    probs = pick_probabilities(model, "mgr-x", available, roster_counts={"RB": 4})
+    probs = pick_probabilities(model, "mgr-x", available, roster_counts={"RB": 4}, round_=1)
     assert all(p >= 0 for p in probs.values())
     assert sum(probs.values()) == pytest.approx(1.0)
 
@@ -329,7 +329,7 @@ def test_pick_probabilities_favors_lower_adp_absent_roster_pressure():
         AvailablePlayer("best", "RB", 1.0),
         AvailablePlayer("worst", "RB", 100.0),
     ]
-    probs = pick_probabilities(model, "mgr-x", available)
+    probs = pick_probabilities(model, "mgr-x", available, round_=1)
     assert probs["best"] > probs["worst"]
 
 
@@ -341,8 +341,8 @@ def test_roster_need_suppresses_repeated_position():
         AvailablePlayer("qb", "QB", 10.0),
         AvailablePlayer("rb", "RB", 10.0),
     ]
-    probs_deep = pick_probabilities(model, "mgr-x", available, roster_counts={"QB": 3})
-    probs_empty = pick_probabilities(model, "mgr-x", available, roster_counts={"QB": 0})
+    probs_deep = pick_probabilities(model, "mgr-x", available, roster_counts={"QB": 3}, round_=1)
+    probs_empty = pick_probabilities(model, "mgr-x", available, roster_counts={"QB": 0}, round_=1)
     assert probs_deep["qb"] < probs_empty["qb"]
 
 
@@ -353,7 +353,7 @@ def test_sampling_is_reproducible_from_seed_and_does_not_touch_global_state():
     before = np.random.get_state()
 
     rng1 = np.random.default_rng(42)
-    draws1 = [sample_pick(model, "mgr-x", available, {}, rng1) for _ in range(20)]
+    draws1 = [sample_pick(model, "mgr-x", available, {}, rng1, round_=1) for _ in range(20)]
 
     after = np.random.get_state()
     # Global numpy random state must be untouched by a call that was given
@@ -361,7 +361,7 @@ def test_sampling_is_reproducible_from_seed_and_does_not_touch_global_state():
     assert before[1].tolist() == after[1].tolist()
 
     rng2 = np.random.default_rng(42)
-    draws2 = [sample_pick(model, "mgr-x", available, {}, rng2) for _ in range(20)]
+    draws2 = [sample_pick(model, "mgr-x", available, {}, rng2, round_=1) for _ in range(20)]
 
     assert draws1 == draws2
 
@@ -370,7 +370,7 @@ def test_sample_pick_raises_on_empty_available():
     model = _model_no_effects()
     rng = np.random.default_rng(0)
     with pytest.raises(ValueError):
-        sample_pick(model, "mgr-x", [], {}, rng)
+        sample_pick(model, "mgr-x", [], {}, rng, round_=1)
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +456,7 @@ def test_sampling_per_call_timing():
     n_calls = 2000
     start = time.perf_counter()
     for _ in range(n_calls):
-        sample_pick(model, "mgr-x", available, {"RB": 2}, rng)
+        sample_pick(model, "mgr-x", available, {"RB": 2}, rng, round_=1)
     elapsed = time.perf_counter() - start
 
     per_call_ms = 1000 * elapsed / n_calls
@@ -581,3 +581,76 @@ def test_build_pool_adp_lookup_reports_unmatched_never_silently_drops():
     assert set(report.unmatched_ids) == {"p2", "p3"}
     # Every pool player accounted for, one way or the other.
     assert report.matched + report.unmatched == report.total == 3
+
+
+# ---------------------------------------------------------------------------
+# The fitted per-round temperature schedule (HANDOFF open item 3b).
+#
+# The incumbent flat 3.0 was wrong in both directions at once: too random
+# early (elite players surviving to our pick 8 when they never did in seven
+# real drafts) and too rigid late. These guard the properties that made the
+# schedule worth shipping, not the exact fitted numbers -- a refit on new
+# draft data should move the values without failing the suite.
+
+
+def test_temperature_rises_from_early_to_late_rounds():
+    """The whole point of the schedule. Round 1 is near-consensus; the late
+    rounds are idiosyncratic. Compared endpoint-to-endpoint rather than
+    pairwise-monotone on purpose: the raw MLE has small non-monotone dips
+    at rounds 4-5 and 14-16 that are sampling noise at ~70 picks/round."""
+    from ffdraft.models.opponent import temperature_for_round
+
+    assert temperature_for_round(1) < temperature_for_round(5)
+    assert temperature_for_round(5) < temperature_for_round(12)
+    assert temperature_for_round(12) < temperature_for_round(17)
+
+
+def test_round_one_is_more_decisive_than_the_superseded_flat_value():
+    """Round 1's MLE is 2.30 with a 95% CI of [1.85, 2.90] -- the old flat
+    3.0 sits outside it. This is the specific defect the owner reported:
+    top players surviving to pick 8 far more often than they really do."""
+    from ffdraft.models.opponent import LEGACY_FLAT_TEMPERATURE, temperature_for_round
+
+    assert temperature_for_round(1) < LEGACY_FLAT_TEMPERATURE
+    assert temperature_for_round(1) <= 2.90
+
+
+def test_rounds_past_the_fitted_table_reuse_the_deepest_round():
+    """Round 18 exists only in this league's 2023+ drafts and has too few
+    training picks to fit. Reusing the deepest fitted value is deliberate --
+    extrapolating a trend off the end of the data would invent a number."""
+    from ffdraft.models.opponent import TEMPERATURE_BY_ROUND, temperature_for_round
+
+    deepest = max(TEMPERATURE_BY_ROUND)
+    assert temperature_for_round(deepest + 1) == TEMPERATURE_BY_ROUND[deepest]
+    assert temperature_for_round(99) == TEMPERATURE_BY_ROUND[deepest]
+
+
+def test_a_missing_round_raises_rather_than_defaulting():
+    """No silent fallback to the superseded flat value: a caller that forgot
+    to thread the round through would otherwise get plausible-looking output
+    from exactly the model this schedule replaced."""
+    from ffdraft.models.opponent import temperature_for_round
+
+    model = OpponentModel(league_mu=0.0, pos_effect={"RB": 0.0}, sigma2=0.1)
+    available = [AvailablePlayer(player_id="a", position="RB", adp=1.0)]
+
+    with pytest.raises(ValueError, match="round_"):
+        pick_probabilities(model, "mgr-x", available)
+
+    with pytest.raises(ValueError, match="round_"):
+        temperature_for_round(0)
+
+
+def test_lower_temperature_concentrates_probability_on_the_top_of_the_board():
+    """The mechanism behind the fix, stated as a property: a colder round 1
+    must make the consensus best player *more* likely to go, which is what
+    stops him surviving to our pick."""
+    model = OpponentModel(league_mu=0.0, pos_effect={"RB": 0.0}, sigma2=0.1)
+    available = [
+        AvailablePlayer(player_id=f"p{i}", position="RB", adp=float(i + 1))
+        for i in range(30)
+    ]
+    cold = pick_probabilities(model, "mgr-x", available, temperature=1.0)
+    warm = pick_probabilities(model, "mgr-x", available, temperature=10.0)
+    assert cold["p0"] > warm["p0"]

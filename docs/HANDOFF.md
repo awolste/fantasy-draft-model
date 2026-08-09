@@ -588,6 +588,53 @@ Forcing RB/WR in the first three rounds means **not taking the early QB**. In 20
 2. **The decision that carries real weight at picks 8 and 13 is whether to spend one on a quarterback**, and its payoff swings ±15pp depending on something unknowable in advance (how good streamable QBs turn out to be that year).
 3. ~~Size the QB bet down.~~ **SUPERSEDED — measured and contradicted, see §10.** Sweeping a QB-replacement penalty across 2020-2024 shows the mean championship rate *falls* as the tilt shrinks (11.47% at delta=0 down to 9.27% at delta=5). It buys lower season-to-season variance, which is worthless for a draft you run once. Leave the value function alone and take the best available player.
 
+## 7d. Opponent-model temperature — FIXED 2026-08-09 (item 3b)
+
+The flat `DEFAULT_TEMPERATURE = 3.0` is replaced by `TEMPERATURE_BY_ROUND`, a per-round table fit by maximum likelihood.
+
+**The defect was in both directions at once, which is why no single number could fix it.** Measured against seven real drafts (`scripts/diagnose_temperature.py`), best-available ADP rank at our own picks:
+
+```
+ pick        REAL     flat 3.0    schedule
+    8         5.1         4.4         5.2     <- was too RANDOM early
+   13         7.4         8.1         8.8
+   28        20.0        21.8        18.5
+   33        25.3        26.6        22.1
+   48        32.1        41.4        31.7     <- was too RIGID late
+```
+
+Flat 3.0 left the consensus ADP-1 player on the board at pick 8 in **9%** of simulations; that never once happened in seven real drafts. Lowering the flat value fixes pick 8 and makes pick 48 worse.
+
+**The fit** (`scripts/fit_temperature.py`): maximum likelihood per round over all 1,125 usable picks, with the reach model and `roster_decay` held fixed so temperature cannot absorb a misfit from either. T climbs 2.30 (round 1) to ~24 (round 17).
+
+**Validation, leave-one-season-out:** held-out log-likelihood **+1.72/pick, better in 7 of 7 seasons**. Independently, on a statistic it was *not* fit against, mean absolute error versus the real draft board halves (2.76 → 1.32 ranks).
+
+**Why not the simpler linear form.** `T = 1.95 + 1.16*round` matches on aggregate held-out LL (+1.73 vs +1.72) with 2 parameters instead of 17 — but its intercept is `T(1) = 3.11`, outside round 1's own 95% CI of **[1.85, 2.90]**. Aggregate LL is dominated by the ~80% of picks in rounds 6-17 where no decision is at stake; round 1 is our pick 8. The per-round table generalised just as well, so the smoother form bought nothing where it mattered.
+
+**Two caveats, both measured and both against the change:**
+- Nearly all of the +1.72 is late-round. Restricted to **rounds 1-3** — the only picks this tool advises on — the gain is **+0.065/pick (SE 0.022)**, better in 6 of 7. Real, ~3σ, small. This is a better-calibrated opponent model, not a transformation of draft-day advice.
+- **Top-1 accuracy falls 0.45pp**, which is exactly the criterion the flat 3.0 was originally tuned on. Judged the wrong criterion — rollouts *sample* from this distribution rather than taking its argmax — but recorded rather than buried.
+
+### The gate did NOT improve, and there is a leak in the re-run
+
+```
+season         engine         adp    engine-adp
+2020           20.67%       9.67%      +11.00pp
+2021           20.00%      10.00%      +10.00pp
+2022           22.67%      15.00%       +7.67pp
+2023            7.33%      16.00%       -8.67pp
+2024            7.00%      20.67%      -13.67pp
+
+engine - adp = +1.27pp (between-season SE 5.17pp), 3 of 5 seasons
+   was:        +2.86pp (between-season SE 4.15pp), 3 of 5 seasons
+```
+
+**Statistically unchanged** (both well inside a ~5pp SE), and nominally slightly worse. Do not claim this fix improved the engine's edge; it did not. What it improved is the fidelity of the simulated league, which is its own job.
+
+**Leak, named because it is mine:** `backtest.fit_holdout_context` correctly refits the *reach* model through the prior season only, but `TEMPERATURE_BY_ROUND` is a module constant fit on all of 2018-2024 — **including every holdout season**. The gate numbers above are therefore leaky. Two things bound the damage: it does not touch draft-day use (2026 is outside the fitting range), and it cannot have flattered us, since both contenders face the same simulated opponents and it was **ADP** that gained most (2024: 10.00% → 20.67%). Fixing it properly means threading a per-holdout schedule through `run_rollout` and moving the likelihood replay out of `scripts/` into `src/` — recorded as an open item, not half-done.
+
+**Also worth noticing in that table:** ADP's own championship rate rises monotonically across holdouts, 9.67% → 20.67%. That trend is not explained and predates this change in direction; it deserves its own look before any gate number is trusted.
+
 ## 8. The recurring failure pattern — read this before trusting any number
 
 **Every genuine defect in this project produced plausible-looking output and raised no errors.** None were found by reading code. All were found by checking a reported number against raw data or against the artifact that actually mattered.
@@ -878,7 +925,10 @@ Three defects were found by the owner reading a mock roster, not by any automate
 ### Current open items, in priority order
 
 1. ~~**Item 3 — the QB/TE tilt in `value.py`'s replacement levels.**~~ **CLOSED 2026-08-09 — mechanism localised, two fixes measured, neither works.** See §7c "Resolution". The tilt is real (top-40: QB 6/TE 4 vs ADP's 1/1) and its cause is now known (the waiver baseline prices a slot as if it will never be drafted). But a coherent all-position correction loses 4.40pp (2.1σ) and a rounds-1-3 QB/TE ban is 0.1σ while swinging ±11pp by season. **`value.py` is unchanged and should stay that way absent new evidence.** Anyone reopening this needs a fix that does *not* amount to a fixed bet on that season's QB streaming quality — that is the part the data says is unknowable at draft time. Do not re-run the §10c delta sweep; it is confounded (see the note there).
-2. **Item 3b — pick-dependent opponent-model temperature.** Refit against `league_drafts`, validate against the backtest, do not tune until survival numbers look plausible. **Now the highest-value open item**, and it also biases everything above: the opponent model lets top-5 players fall to pick 8 too often, which flatters early-QB/TE structures in every measurement on this page.
+2. ~~**Item 3b — pick-dependent opponent-model temperature.**~~ **FIXED 2026-08-09 — see §7d.** `TEMPERATURE_BY_ROUND` replaces the flat 3.0; held-out LL +1.72/pick, 7/7 seasons; board realism error halved. The gate is statistically unchanged (+1.27pp vs +2.86pp, SE ~5pp) — this bought fidelity, not edge. **Two follow-ups it created:**
+   - **2a. The backtest leaks temperature.** `TEMPERATURE_BY_ROUND` is fit on 2018-2024 including every holdout, while `fit_holdout_context` refits the reach model through the prior season only. Fix by threading a per-holdout schedule through `run_rollout` and moving the likelihood replay from `scripts/fit_temperature.py` into `src/`. Does not affect draft-day use (2026 is outside the fitting range).
+   - **2b. ADP's championship rate rises monotonically across holdouts** (9.67% → 20.67%, 2020 → 2024) and nothing explains it. Until it is explained, treat every `engine - adp` number on this page as suspect.
+   - **Every measurement taken before 2026-08-09 used the flat temperature**, including §7c's structure study and its resolution. Their conclusions are not invalidated (the opponent environment was shared by all contenders), but their exact numbers would move on a re-run.
 3. **Item 4** — state-dependent between-rollout variance.
 4. **Item 6** — pin smaller budgets in the two slow real-data tests.
 5. **Item 7** — `sources/nflverse.py` → `models/kicking.py` layering inversion.

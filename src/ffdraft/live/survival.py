@@ -122,7 +122,13 @@ def survival_probabilities(
                 )
                 for pid in here
             ]
-            taken = sample_pick(model, f"slot_{team}", candidates, counts, rng)
+            taken = sample_pick(
+                model, f"slot_{team}", candidates, counts, rng,
+                # Survival must use the same per-round temperature the
+                # rollouts do, or "will he last?" would be answered by a
+                # differently-behaved league than the one being simulated.
+                round_=(first_pick + offset - 1) // n_teams + 1,
+            )
             gone.add(taken)
             counts[pool[taken].position] = counts.get(pool[taken].position, 0) + 1
         for pid in candidate_ids:

@@ -683,7 +683,7 @@ def run_rollout(
     replacement_by_position: Mapping[str, WeeklyDistribution],
     rng: np.random.Generator,
     our_team: int = DRAFT_SLOT,
-    temperature: float = DEFAULT_TEMPERATURE,
+    temperature: float | None = None,
     roster_decay: float = DEFAULT_ROSTER_DECAY,
     adp_table: pl.DataFrame | None = None,
     rankings: pl.DataFrame | None = None,
@@ -783,6 +783,10 @@ def run_rollout(
                 rng=rng,
                 temperature=temperature,
                 roster_decay=roster_decay,
+                # 1-indexed round of the pick being sampled. `temperature`
+                # is normally None, so this is what selects the fitted
+                # temperature -- see models.opponent.TEMPERATURE_BY_ROUND.
+                round_=(next_overall - 1) // state.n_teams + 1,
             )
             position = pool[player_id].position
 
