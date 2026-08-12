@@ -215,15 +215,10 @@ function renderPlan() {
     + `  - title ${pct(n.championship_probability)}, available ${pct(n.p_available)}`
     + (n.indistinguishable_from_leader ? " [statistical tie]" : ""));
   document.getElementById("prompt").value =
-    `Draft plan, slot ${TREE.draft_slot} of ${TREE.n_teams}, rounds 1-${path.length}:
-`
-    + lines.join("
-").replace(/&mdash;/g, "-")
-    + `
-
-Ends ${rb} RB / ${wr} WR.`
-    + `
-From the precomputed pick tree built ${TREE.generated} at ${TREE.budget};`
+    `Draft plan, slot ${TREE.draft_slot} of ${TREE.n_teams}, rounds 1-${path.length}:\n`
+    + lines.join("\n").replace(/&mdash;/g, "-")
+    + `\n\nEnds ${rb} RB / ${wr} WR.`
+    + `\nFrom the precomputed pick tree built ${TREE.generated} at ${TREE.budget};`
     + ` "available" is measured over ${TREE.survival_sims} opponent simulations.`;
 }
 

@@ -17,9 +17,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 
-PAGE = """<!doctype html>
+PAGE = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -297,6 +300,46 @@ render();
 """
 
 
+def _check_script(html: str) -> None:
+    """Refuse to write a page whose JavaScript does not parse.
+
+    This exists because it already happened: `PAGE` was a normal Python
+    string, so every `\n` written inside the JavaScript became a real
+    newline, which split `lines.join("\n")` into an unterminated string
+    literal. The whole script failed to parse and the page rendered
+    completely blank -- no error visible, nothing to click.
+
+    It survived review because the page was "verified" by pasting an
+    equivalent script into a browser rather than by running the generated
+    file, and the preview pane strips inline scripts so the real artifact
+    was never executed. A syntax check on the actual output is the cheap
+    guard against the whole class.
+
+    Skipped with a warning when node is unavailable, rather than failing a
+    build for a missing dev tool.
+    """
+    node = shutil.which("node")
+    if node is None:
+        print("WARNING: node not found -- generated JavaScript was NOT syntax-checked")
+        return
+
+    start = html.index("<script>") + len("<script>")
+    script = html[start : html.index("</script>", start)]
+    with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+        fh.write(script)
+        tmp = fh.name
+    try:
+        result = subprocess.run([node, "--check", tmp], capture_output=True, text=True)
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+    if result.returncode != 0:
+        raise SystemExit(
+            "generated JavaScript does not parse -- refusing to write a blank "
+            f"page:\n{result.stderr.strip()}"
+        )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--tree", type=Path, default=Path("data/pick_tree.json"))
@@ -314,6 +357,7 @@ def main() -> None:
         .replace("__CALLS__", str(tree["n_recommend_calls"]))
         .replace("__SURVSIMS__", str(tree["survival_sims"]))
     )
+    _check_script(html)
     args.out.write_text(html)
     size = args.out.stat().st_size / 1024
     print(f"wrote {args.out} ({size:.0f} KB)")
