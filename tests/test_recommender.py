@@ -500,3 +500,60 @@ def test_unrestricted_behaviour_is_unchanged():
     assert [c.championship_probability for c in a.candidates] == [
         c.championship_probability for c in b.candidates
     ]
+
+
+# ---------------------------------------------------------------------------
+# Parallel candidate evaluation
+#
+# Candidates are independent, and every one of them deliberately reuses the
+# same rollout and season seeds (common random numbers), which are drawn in
+# the parent. Parallelism therefore must not move a single number -- it only
+# changes which process does the arithmetic.
+
+
+def test_parallel_and_serial_give_identical_results():
+    pool = _pool_with_dominant_player(60)
+    state = DraftState.from_picks([], n_teams=10, rounds=4)
+    kw = dict(
+        state=state, pool=pool, model=FLAT_MODEL,
+        replacement_by_position=REPLACEMENT_BY_POSITION, seed=11, our_team=1,
+        n_candidates=4, n_rollouts=3, n_sims_per_rollout=50,
+    )
+    serial = recommend_pick(**kw, n_workers=1)
+    parallel = recommend_pick(**kw, n_workers=3)
+
+    assert [c.player_id for c in serial.candidates] == [c.player_id for c in parallel.candidates]
+    assert [c.championship_probability for c in serial.candidates] == [
+        c.championship_probability for c in parallel.candidates
+    ]
+    assert [c.standard_error for c in serial.candidates] == [
+        c.standard_error for c in parallel.candidates
+    ]
+
+
+def test_a_broken_pool_falls_back_to_serial_rather_than_failing(monkeypatch):
+    """On draft day a failure to start workers must cost time, not the pick.
+    The fallback warns, so a permanently broken pool is visible instead of
+    quietly costing multiples on every pick for the rest of the draft."""
+    from ffdraft.draft import recommender as rec
+
+    pool = _pool_with_dominant_player(60)
+    state = DraftState.from_picks([], n_teams=10, rounds=4)
+    kw = dict(
+        state=state, pool=pool, model=FLAT_MODEL,
+        replacement_by_position=REPLACEMENT_BY_POSITION, seed=5, our_team=1,
+        n_candidates=4, n_rollouts=2, n_sims_per_rollout=50,
+    )
+    expected = recommend_pick(**kw, n_workers=1)
+
+    def _boom(*a, **k):
+        raise OSError("no workers for you")
+
+    monkeypatch.setattr(rec, "ProcessPoolExecutor", _boom)
+    with pytest.warns(RuntimeWarning, match="falling back to serial"):
+        got = recommend_pick(**kw, n_workers=4)
+
+    assert [c.player_id for c in got.candidates] == [c.player_id for c in expected.candidates]
+    assert [c.championship_probability for c in got.candidates] == [
+        c.championship_probability for c in expected.candidates
+    ]

@@ -695,6 +695,7 @@ def run_rollout(
     adp_table: pl.DataFrame | None = None,
     rankings: pl.DataFrame | None = None,
     pick_policy: PickPolicy | None = None,
+    adp_lookup: Mapping[str, float] | None = None,
 ) -> DraftState:
     """Play `state` forward, pick by pick, until every roster is full.
 
@@ -739,15 +740,21 @@ def run_rollout(
     """
     replacement_means = {pos: float(dist.mean) for pos, dist in replacement_by_position.items()}
 
-    if adp_table is not None:
-        if rankings is None:
-            raise ValueError(
-                "rankings must be supplied whenever adp_table is given -- it is needed to "
-                "resolve D/ST team abbreviations for the ADP join (see pool_adp_lookup)."
-            )
-        adp_lookup, _adp_report = pool_adp_lookup(pool, adp_table, rankings)
-    else:
-        adp_lookup = {pid: float(p.rank) for pid, p in pool.items()}
+    if adp_lookup is None:
+        # `pool_adp_lookup` is a polars join over the whole pool and depends
+        # only on (pool, adp_table, rankings) -- none of which change across
+        # the rollouts of one recommendation. Callers that run many rollouts
+        # should resolve it once and pass it in; `recommend_pick` does, which
+        # removes 192 identical joins per call.
+        if adp_table is not None:
+            if rankings is None:
+                raise ValueError(
+                    "rankings must be supplied whenever adp_table is given -- it is needed to "
+                    "resolve D/ST team abbreviations for the ADP join (see pool_adp_lookup)."
+                )
+            adp_lookup, _adp_report = pool_adp_lookup(pool, adp_table, rankings)
+        else:
+            adp_lookup = {pid: float(p.rank) for pid, p in pool.items()}
 
     picks: list[Pick] = list(state.picks)
     rosters: dict[int, list[tuple[str, str]]] = {

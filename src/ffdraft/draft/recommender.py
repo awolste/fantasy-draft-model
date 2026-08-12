@@ -184,11 +184,15 @@ not as meaningfully behind it.
 from __future__ import annotations
 
 import time
+import warnings
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
 import numpy as np
 import polars as pl
+
+from concurrent.futures import ProcessPoolExecutor
+from multiprocessing import current_process, get_context
 
 from ..league import DRAFT_SLOT
 from ..models.base import WeeklyDistribution
@@ -197,7 +201,7 @@ from ..models.opponent import DEFAULT_ROSTER_DECAY, DEFAULT_TEMPERATURE, Opponen
 from ..models.roster import build_roster
 from ..sim.lineup import RosterPlayer
 from ..sim.season import SeasonRosterPlayer, simulate_season
-from .rollout import DraftState, Pick, run_rollout
+from .rollout import DraftState, Pick, pool_adp_lookup, run_rollout
 from .value import PlayerValue, dominant_candidates, value_available
 
 # ---------------------------------------------------------------------------
@@ -514,6 +518,142 @@ def measure_variance_decomposition(
     )
 
 
+# ---------------------------------------------------------------------------
+# Per-candidate evaluation, and running the candidates in parallel
+#
+# Candidates are embarrassingly parallel: each forces a different pick and
+# then simulates forward independently. They are NOT independent in their
+# randomness -- every candidate deliberately reuses the same rollout and
+# season seeds (see module docstring, "Common random numbers"), and those
+# seeds are derived in the parent and passed down. Parallelism therefore
+# changes only *where* the work happens, never any number: which worker
+# picks up which candidate is irrelevant, and results are collected into a
+# dict keyed by player id rather than by completion order.
+
+
+def _evaluate_candidate(
+    player_id, position, state_picks, n_teams, rounds, pool, model,
+    replacement_by_position, replacement_means, adp_lookup, our_team,
+    temperature, roster_decay, rollout_child_seeds, season_seeds,
+    n_sims_per_rollout, next_overall_pick,
+):
+    """One candidate's per-rollout championship probabilities.
+
+    Module-level and fully explicit in its arguments so the sequential path
+    and a worker process run byte-for-byte the same code -- a parallel path
+    that drifted from the serial one would be exactly the kind of
+    plausible-but-different result this project keeps getting bitten by.
+    """
+    cand_pick = Pick(
+        overall_pick=next_overall_pick, team=our_team,
+        player_id=player_id, position=position,
+    )
+    state_after = DraftState.from_picks(
+        list(state_picks) + [cand_pick], n_teams=n_teams, rounds=rounds
+    )
+
+    p_r = np.empty(len(rollout_child_seeds), dtype=float)
+    for r, child_seed in enumerate(rollout_child_seeds):
+        final = run_rollout(
+            state_after, pool, model, replacement_by_position,
+            np.random.default_rng(child_seed), our_team=our_team,
+            temperature=temperature, roster_decay=roster_decay,
+            adp_lookup=adp_lookup,
+        )
+        rosters = _rosters_for_season(final, pool, replacement_by_position)
+        season_result = simulate_season(
+            rosters, n_sims=n_sims_per_rollout, seed=season_seeds[r],
+            replacement_means=replacement_means,
+        )
+        p_r[r] = season_result.championship_probabilities[our_team - 1]
+    return player_id, p_r
+
+
+_WORKER: dict = {}
+
+
+def _init_worker(shared: dict) -> None:
+    """Receive the heavy, per-call-constant context once per worker.
+
+    The player pool, opponent model and replacement distributions are the
+    expensive things to send, and they are identical for every candidate;
+    passing them as initargs sends them once per *worker* rather than once
+    per *task*. Each task then carries only a player id and position.
+    """
+    _WORKER.clear()
+    _WORKER.update(shared)
+
+
+def _worker_task(candidate: tuple[str, str]):
+    player_id, position = candidate
+    return _evaluate_candidate(player_id, position, **_WORKER)
+
+
+def _evaluate_all_candidates(
+    candidates: Sequence[PlayerValue], shared: dict, n_workers: int
+) -> dict[str, np.ndarray]:
+    """Every candidate's per-rollout probabilities, in parallel if asked.
+
+    ## The caller MUST have an `if __name__ == "__main__"` guard
+
+    Every start method available on macOS rebuilds the worker's namespace by
+    executing the *main module*. Without a guard that re-runs the caller's
+    whole script inside every worker: measured here, a guardless script ran
+    itself three times and finished **slower than serial** (44.9s vs 13.6s)
+    while still printing the right answer -- silent waste, and worse if the
+    script has side effects. `forkserver` was tried and does not avoid this;
+    it only moves which process does the importing.
+
+    **This is why parallelism is opt-in and off by default.** A Streamlit
+    script never has that guard, so the live draft-day app must stay serial;
+    batch scripts with a `main()` entry point can and should turn it on.
+    Nested use is also blocked below -- a worker never starts its own pool.
+
+    ## Why it still falls back
+
+    A parallel failure on draft day must not cost the pick. Any failure to
+    start or use the pool falls back to the serial loop, which produces
+    **identical** numbers (candidates are independent and their seeds are
+    fixed in the parent) and merely takes longer. The fallback warns rather
+    than passing silently, so a permanently broken pool is visible instead
+    of quietly costing 4x on every pick for the rest of the draft.
+    """
+    per_candidate_p_r: dict[str, np.ndarray] = {}
+
+    # Never let a worker start its own pool: `recommend_pick` called from
+    # inside a worker (a script that parallelises at a higher level) would
+    # otherwise fan out multiplicatively.
+    in_worker = current_process().name != "MainProcess"
+
+    if n_workers > 1 and len(candidates) > 1 and not in_worker:
+        try:
+            ctx = get_context("spawn")
+            with ProcessPoolExecutor(
+                max_workers=min(n_workers, len(candidates)),
+                initializer=_init_worker,
+                initargs=(shared,),
+                mp_context=ctx,
+            ) as pool_exec:
+                for pid, p_r in pool_exec.map(
+                    _worker_task, [(c.player_id, c.position) for c in candidates]
+                ):
+                    per_candidate_p_r[pid] = p_r
+            return per_candidate_p_r
+        except Exception as exc:  # noqa: BLE001 -- any pool failure is recoverable
+            warnings.warn(
+                f"parallel candidate evaluation failed ({type(exc).__name__}: {exc}); "
+                f"falling back to serial. Results are unaffected, only slower.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            per_candidate_p_r = {}
+
+    for cand in candidates:
+        pid, p_r = _evaluate_candidate(cand.player_id, cand.position, **shared)
+        per_candidate_p_r[pid] = p_r
+    return per_candidate_p_r
+
+
 def recommend_pick(
     state: DraftState,
     pool: Mapping[str, PlayerDistribution],
@@ -529,6 +669,7 @@ def recommend_pick(
     adp_table: pl.DataFrame | None = None,
     rankings: pl.DataFrame | None = None,
     restrict_to_positions: frozenset[str] | None = None,
+    n_workers: int = 1,
 ) -> RecommendationResult:
     """Recommend a ranked list of candidate picks for `our_team` at
     `state`'s next pick, by simulated championship probability.
@@ -592,43 +733,35 @@ def recommend_pick(
     season_seed_seq = np.random.SeedSequence([seed, 1])
     season_seeds = [int(s.generate_state(1)[0]) for s in season_seed_seq.spawn(n_rollouts)]
 
+    # Resolve ADP once. `run_rollout` would otherwise redo this polars join
+    # on every one of the `n_candidates * n_rollouts` rollouts, for an
+    # answer that cannot change.
+    if adp_table is not None:
+        if rankings is None:
+            raise ValueError(
+                "rankings must be supplied whenever adp_table is given -- it is needed to "
+                "resolve D/ST team abbreviations for the ADP join (see pool_adp_lookup)."
+            )
+        adp_lookup, _adp_report = pool_adp_lookup(pool, adp_table, rankings)
+    else:
+        adp_lookup = {pid: float(entry.rank) for pid, entry in pool.items()}
+
+    shared = dict(
+        state_picks=tuple(state.picks), n_teams=state.n_teams, rounds=state.rounds,
+        pool=pool, model=model, replacement_by_position=replacement_by_position,
+        replacement_means=replacement_means, adp_lookup=adp_lookup, our_team=our_team,
+        temperature=temperature, roster_decay=roster_decay,
+        rollout_child_seeds=list(rollout_child_seeds), season_seeds=season_seeds,
+        n_sims_per_rollout=n_sims_per_rollout,
+        next_overall_pick=state.next_overall_pick,
+    )
+
     per_candidate_p_r: dict[str, np.ndarray] = {}
-    per_candidate_value: dict[str, PlayerValue] = {}
+    per_candidate_value: dict[str, PlayerValue] = {
+        cand.player_id: cand for cand in candidates
+    }
 
-    for cand in candidates:
-        per_candidate_value[cand.player_id] = cand
-        cand_pick = Pick(
-            overall_pick=state.next_overall_pick,
-            team=our_team,
-            player_id=cand.player_id,
-            position=cand.position,
-        )
-        state_after = DraftState.from_picks(
-            list(state.picks) + [cand_pick], n_teams=state.n_teams, rounds=state.rounds
-        )
-
-        p_r = np.empty(n_rollouts, dtype=float)
-        for r in range(n_rollouts):
-            rollout_rng = np.random.default_rng(rollout_child_seeds[r])
-            final = run_rollout(
-                state_after,
-                pool,
-                model,
-                replacement_by_position,
-                rollout_rng,
-                our_team=our_team,
-                temperature=temperature,
-                roster_decay=roster_decay,
-                adp_table=adp_table,
-                rankings=rankings,
-            )
-            rosters = _rosters_for_season(final, pool, replacement_by_position)
-            season_result = simulate_season(
-                rosters, n_sims=n_sims_per_rollout, seed=season_seeds[r], replacement_means=replacement_means
-            )
-            p_r[r] = season_result.championship_probabilities[our_team - 1]
-
-        per_candidate_p_r[cand.player_id] = p_r
+    per_candidate_p_r = _evaluate_all_candidates(candidates, shared, n_workers)
 
     # Rank by mean championship probability; ties (possible only with tiny
     # synthetic n_rollouts/n_sims_per_rollout in tests) broken by player_id.

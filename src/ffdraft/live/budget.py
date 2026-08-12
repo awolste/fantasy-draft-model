@@ -9,6 +9,7 @@ in `tests/test_live_cache.py` possible at all.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 from ..draft.recommender import (
@@ -24,11 +25,34 @@ class Budget:
     n_rollouts: int
     n_sims_per_rollout: int
     seed: int
+    n_workers: int = 1
+    """Processes to spread the candidates over. `1` (the default) is serial;
+    `0` means "decide from this machine's core count" -- see `workers`.
+
+    **Serial by default on purpose.** Parallelism cannot change any number
+    (candidates are independent and their seeds are fixed in the parent), so
+    this is purely a wall-clock setting -- but it requires the calling
+    program to have an `if __name__ == "__main__"` guard, which a Streamlit
+    script does not have. See `draft.recommender._evaluate_all_candidates`.
+    Batch scripts with a `main()` entry point should pass `n_workers=0`."""
 
     @property
     def work(self) -> int:
         """Season simulations implied. Runtime is roughly linear in this."""
         return self.n_candidates * self.n_rollouts * self.n_sims_per_rollout
+
+    @property
+    def workers(self) -> int:
+        """Resolved worker count.
+
+        Leaves two cores unclaimed: measured on a 10-core machine, 8 workers
+        beat both 4 (3.0x) and 10 (3.3x) at 3.74x, because the parent process
+        and the OS still need somewhere to run. Never more than one worker
+        per candidate, and never fewer than one.
+        """
+        if self.n_workers > 0:
+            return self.n_workers
+        return max(1, min((os.cpu_count() or 1) - 2, self.n_candidates))
 
     @property
     def label(self) -> str:
@@ -71,7 +95,12 @@ FULL_BUDGET = Budget(
 # rollout allocation fixes, which together made `recommend_pick` ~2.7x
 # faster with bit-identical output. Re-measured at the same budgets:
 #
-#     LIVE_BUDGET (12x16x300)   35.6s  ->  12.6s
+#     LIVE_BUDGET (12x16x300)   35.6s  ->  12.6s  serial
+#                               35.6s  ->   3.2s  8 workers (10.7x)
+#
+# The parallel figure needs `n_workers=0` and a caller with a
+# `if __name__ == "__main__"` guard; the Streamlit app has neither and stays
+# serial deliberately. Output is bit-identical either way.
 #
 # The budgets themselves were left alone rather than quietly widened: the
 # leader was already identical at every budget measured, so the headroom is

@@ -108,6 +108,7 @@ def recommend(
         adp_table=ctx.adp_table,
         rankings=ctx.rankings,
         restrict_to_positions=restrict_to_positions,
+        n_workers=budget.workers,
     )
 
 

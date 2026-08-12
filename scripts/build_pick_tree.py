@@ -52,6 +52,7 @@ to teams by draft slot only.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import time
 from pathlib import Path
@@ -130,6 +131,11 @@ def build(args) -> dict:
     ctx = live_context()
     adp = pool_adp_lookup(ctx.pool, ctx.adp_table, ctx.rankings)[0]
     budget = Budget(4, 4, 60, seed=args.seed) if args.fast else LIVE_BUDGET
+    # This script has a `main()` guard, so it can spread each node's
+    # candidates over the cores -- see
+    # `draft.recommender._evaluate_all_candidates` for why that is opt-in
+    # and why the Streamlit app must not do it.
+    budget = dataclasses.replace(budget, n_workers=args.workers)
 
     our_picks = [
         p for p in range(1, DRAFT_ROUNDS * N_TEAMS + 1)
@@ -258,6 +264,8 @@ def build(args) -> dict:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--seed", type=int, default=8)
+    ap.add_argument("--workers", type=int, default=0,
+                    help="0 = one per core (minus two); 1 = serial")
     ap.add_argument("--fast", action="store_true",
                     help="tiny budget: wiring check only, NOT for draft-day use")
     ap.add_argument("--survival-sims", type=int, default=SURVIVAL_SIMS)
