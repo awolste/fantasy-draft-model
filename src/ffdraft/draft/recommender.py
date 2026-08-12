@@ -497,9 +497,20 @@ def recommend_pick(
     roster_decay: float = DEFAULT_ROSTER_DECAY,
     adp_table: pl.DataFrame | None = None,
     rankings: pl.DataFrame | None = None,
+    restrict_to_positions: frozenset[str] | None = None,
 ) -> RecommendationResult:
     """Recommend a ranked list of candidate picks for `our_team` at
     `state`'s next pick, by simulated championship probability.
+
+    `restrict_to_positions`, if given, prunes only within those positions.
+    This exists because the value function's documented positional tilt
+    (HANDOFF item 3) can fill the entire pruned candidate list with QBs and
+    tight ends -- by round 3 it sometimes contains no running back or wide
+    receiver at all -- so a caller answering "what is the best RB or WR
+    here" cannot get an answer by filtering the default output. It restricts
+    *pruning* only: rollouts, opponents and scoring are untouched, so each
+    candidate's championship probability still accounts for every position
+    we might take later.
 
     Raises `ValueError` if it is not `our_team`'s turn at `state` -- this
     function answers "what should we do right now", not "what would we do
@@ -528,7 +539,16 @@ def recommend_pick(
 
     available_ids = [pid for pid in pool if pid not in state.drafted_ids]
     n_available = len(available_ids)
-    candidates = prune_candidates(available_ids, pool, our_roster_players, replacement_means, n_candidates)
+    prunable_ids = available_ids
+    if restrict_to_positions is not None:
+        prunable_ids = [pid for pid in available_ids if pool[pid].position in restrict_to_positions]
+        if not prunable_ids:
+            raise ValueError(
+                f"restrict_to_positions={sorted(restrict_to_positions)} left no available "
+                f"player at pick {state.next_overall_pick} -- an empty candidate list would "
+                f"otherwise look like a finished recommendation."
+            )
+    candidates = prune_candidates(prunable_ids, pool, our_roster_players, replacement_means, n_candidates)
 
     # Common random numbers: the same n_rollouts opponent-sampling seeds and
     # the same n_rollouts season-simulation seeds are reused for every

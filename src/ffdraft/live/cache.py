@@ -86,6 +86,7 @@ def recommend(
     ctx: Any,
     budget: Budget,
     our_team: int = DRAFT_SLOT,
+    restrict_to_positions: frozenset[str] | None = None,
 ) -> RecommendationResult:
     """The ONLY `recommend_pick` call in this package.
 
@@ -106,6 +107,7 @@ def recommend(
         n_sims_per_rollout=budget.n_sims_per_rollout,
         adp_table=ctx.adp_table,
         rankings=ctx.rankings,
+        restrict_to_positions=restrict_to_positions,
     )
 
 

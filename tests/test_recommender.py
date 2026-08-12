@@ -428,3 +428,75 @@ def test_variance_decomposition_has_not_drifted(real_fixtures):
         f"recorded {MEASURED_BETWEEN_ROLLOUT_SD_PP:.2f}pp -- the DEFAULT_N_ROLLOUTS/"
         "DEFAULT_N_SIMS_PER_ROLLOUT allocation in recommender.py needs re-deriving, not this test loosened."
     )
+
+
+# ---------------------------------------------------------------------------
+# restrict_to_positions
+#
+# Added for the precomputed pick tree (`scripts/build_pick_tree.py`), which
+# asks "what is the best RB or WR here". It cannot get that by filtering the
+# default output: the value function's positional tilt (HANDOFF item 3) can
+# fill the whole pruned list with QBs and tight ends, and a candidate that
+# was never pruned in was never simulated.
+
+
+def test_restrict_to_positions_returns_only_those_positions():
+    pool = _pool_with_dominant_player(60)
+    state = DraftState.from_picks([], n_teams=10, rounds=4)
+    result = recommend_pick(
+        state, pool, FLAT_MODEL, REPLACEMENT_BY_POSITION, seed=1, our_team=1,
+        n_candidates=15, n_rollouts=3, n_sims_per_rollout=50,
+        restrict_to_positions=frozenset({"WR"}),
+    )
+    assert result.candidates, "restriction must not silently empty the list"
+    assert {c.position for c in result.candidates} == {"WR"}
+
+
+def test_restriction_surfaces_a_candidate_the_default_pruning_drops():
+    """The reason this parameter exists. `dominant` is an RB so good it wins
+    every default candidate list; restricting to WR must still return real,
+    simulated WR candidates rather than nothing."""
+    pool = _pool_with_dominant_player(60)
+    state = DraftState.from_picks([], n_teams=10, rounds=4)
+    kw = dict(
+        state=state, pool=pool, model=FLAT_MODEL,
+        replacement_by_position=REPLACEMENT_BY_POSITION, seed=1, our_team=1,
+        n_candidates=5, n_rollouts=3, n_sims_per_rollout=50,
+    )
+    default = recommend_pick(**kw)
+    restricted = recommend_pick(**kw, restrict_to_positions=frozenset({"WR"}))
+
+    assert default.candidates[0].player_id == "dominant"
+    assert all(c.position == "WR" for c in restricted.candidates)
+    assert all(c.championship_probability is not None for c in restricted.candidates)
+
+
+def test_restricting_to_a_position_with_nobody_left_raises():
+    """An empty candidate list would render as a finished recommendation
+    with no picks -- loud failure instead."""
+    pool = _synthetic_pool(60)
+    state = DraftState.from_picks([], n_teams=10, rounds=4)
+    with pytest.raises(ValueError, match="restrict_to_positions"):
+        recommend_pick(
+            state, pool, FLAT_MODEL, REPLACEMENT_BY_POSITION, seed=1, our_team=1,
+            n_candidates=15, n_rollouts=3, n_sims_per_rollout=50,
+            restrict_to_positions=frozenset({"LB"}),
+        )
+
+
+def test_unrestricted_behaviour_is_unchanged():
+    """The parameter must be inert when omitted -- everything already
+    measured with this function has to stay reproducible."""
+    pool = _pool_with_dominant_player(60)
+    state = DraftState.from_picks([], n_teams=10, rounds=4)
+    kw = dict(
+        state=state, pool=pool, model=FLAT_MODEL,
+        replacement_by_position=REPLACEMENT_BY_POSITION, seed=3, our_team=1,
+        n_candidates=8, n_rollouts=3, n_sims_per_rollout=50,
+    )
+    a = recommend_pick(**kw)
+    b = recommend_pick(**kw, restrict_to_positions=None)
+    assert [c.player_id for c in a.candidates] == [c.player_id for c in b.candidates]
+    assert [c.championship_probability for c in a.candidates] == [
+        c.championship_probability for c in b.candidates
+    ]
