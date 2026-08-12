@@ -198,7 +198,7 @@ from ..models.roster import build_roster
 from ..sim.lineup import RosterPlayer
 from ..sim.season import SeasonRosterPlayer, simulate_season
 from .rollout import DraftState, Pick, run_rollout
-from .value import PlayerValue, value_available
+from .value import PlayerValue, dominant_candidates, value_available
 
 # ---------------------------------------------------------------------------
 # Defaults -- see module docstring for how each is derived from the
@@ -247,9 +247,40 @@ def prune_candidates(
     order -- see `tests/test_recommender.py::
     test_prune_candidates_is_deterministic_given_a_state`.
     """
-    values = value_available(list(available_ids), pool, our_roster, replacement_means)
+    # The top `n_candidates` overall are contained in the top
+    # `n_candidates` at each position -- see `value.dominant_candidates`.
+    ids = list(available_ids)
+    values = value_available(
+        dominant_candidates(ids, pool, per_position=n_candidates),
+        pool, our_roster, replacement_means,
+    )
     values.sort(key=lambda v: (-v.value, v.player_id))
-    return values[:n_candidates]
+
+    # By the last rounds fewer than `n_candidates` players have any positive
+    # value at all, and the tail of this list is a tie among zeros broken by
+    # `player_id` -- over the *whole* available pool, not just the reduced
+    # set. Reconstruct that tail exactly rather than letting the reduction
+    # quietly change which filler appears (measured: rounds 17-18 only).
+    #
+    # No scoring is needed for it. `value` is floored at zero, and within a
+    # position the positive values occupy a prefix by mean, so every player
+    # outside the reduced set is worth exactly 0.0 whenever the reduced set
+    # itself has run out of positive values.
+    positive = [v for v in values if v.value > 0.0]
+    if len(positive) >= n_candidates:
+        return positive[:n_candidates]
+
+    seen = {v.player_id for v in positive}
+    filler = [
+        PlayerValue(
+            player_id=pid,
+            position=pool[pid].position,
+            value=0.0,
+            mean=float(pool[pid].distribution.mean),
+        )
+        for pid in sorted(pid for pid in ids if pid not in seen)
+    ]
+    return (positive + filler)[:n_candidates]
 
 
 # ---------------------------------------------------------------------------

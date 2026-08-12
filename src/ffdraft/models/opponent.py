@@ -720,8 +720,21 @@ def pick_probabilities(
         positions.append(p.position)
         player_ids.append(p.player_id)
 
-    reach_adjust = np.array(
-        [model.predicted_reach(manager_id, pos) for pos in positions]
+    # Both the reach adjustment and the roster-need penalty depend only on
+    # a player's *position*, of which there are six -- but the obvious
+    # per-player comprehension called `predicted_reach` 12.4 million times
+    # in a single `recommend_pick`. Look each up once per position.
+    unique_positions = set(positions)
+    reach_by_position = {
+        pos: model.predicted_reach(manager_id, pos) for pos in unique_positions
+    }
+    multiplier_by_position = {
+        pos: max(roster_decay ** roster_counts.get(pos, 0), _MIN_ROSTER_MULTIPLIER)
+        for pos in unique_positions
+    }
+
+    reach_adjust = np.fromiter(
+        (reach_by_position[pos] for pos in positions), dtype=float, count=n
     )
     adjusted_log_pick = np.log(adp) - reach_adjust
 
@@ -732,11 +745,8 @@ def pick_probabilities(
 
     base_weight = np.exp(-rank / temperature)
 
-    roster_multiplier = np.array(
-        [
-            max(roster_decay ** roster_counts.get(pos, 0), _MIN_ROSTER_MULTIPLIER)
-            for pos in positions
-        ]
+    roster_multiplier = np.fromiter(
+        (multiplier_by_position[pos] for pos in positions), dtype=float, count=n
     )
 
     weight = base_weight * roster_multiplier

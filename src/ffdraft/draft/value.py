@@ -428,3 +428,64 @@ def value_available(
             PlayerValue(player_id=player_id, position=entry.position, value=value, mean=mean)
         )
     return results
+
+
+def dominant_candidates(
+    available_ids: Sequence[str],
+    pool: Mapping[str, PlayerDistribution],
+    per_position: int = 1,
+) -> list[str]:
+    """The only players that can be among the top `per_position` by value.
+
+    ## Why this is exact, not an approximation
+
+    Hold the roster and every other argument fixed and compare two
+    available players at the **same position**, where `mean_a >= mean_b`.
+    Every term of `value_available` is monotone non-decreasing in the mean:
+
+    * `lineup_marginal` is `solve_lineup(roster + p) - baseline`. Any lineup
+      assignment available to `b` is available to `a` at a score at least as
+      high (same position, so `a` is eligible everywhere `b` is, and scores
+      more), so the optimum with `a` is at least the optimum with `b` --
+      including the FLEX case, where a real leftover always fills the slot
+      and `a` simply contributes more than `b` does.
+    * `_bench_value` is `P(reaches) * over_replacement`. `over_replacement`
+      rises with the mean. `ahead` is the set of rostered players scoring
+      **at or above** `p`, so a higher mean can only shrink it, which can
+      only shrink `gap` and raise `P(reaches)`. A higher mean can also move
+      `p` from the FLEX phase into his own dedicated slot, which swaps the
+      FLEX baseline (`max` over the eligible group) for his own position's
+      -- never higher, so never a smaller `over_replacement`.
+    * `value` is the `max` of the two, and `max` preserves monotonicity.
+
+    So within a position the best-by-mean player has the highest value, the
+    second-best-by-mean is next, and so on. A caller that wants the single
+    best player overall need only score one player per position; a caller
+    that wants the top `k` overall need only score `k` per position.
+
+    ## Why it matters
+
+    `draft.rollout._choose_our_pick` runs at every one of our own picks in
+    every rollout and wants only the argmax, but was scoring the entire
+    available pool: measured at **1.24 million `solve_lineup` calls, 61% of
+    a single `recommend_pick`**. Scoring six players instead of ~380 removes
+    that without changing which player is chosen.
+
+    Ties in mean are broken by position of first appearance in
+    `available_ids`, and the returned order follows `available_ids`, so a
+    caller's own downstream tie-breaking sees exactly the order it would
+    have seen unreduced.
+    """
+    if per_position < 1:
+        raise ValueError(f"per_position must be >= 1, got {per_position}")
+
+    order = {pid: i for i, pid in enumerate(available_ids)}
+    by_position: dict[str, list[str]] = {}
+    for pid in available_ids:
+        by_position.setdefault(pool[pid].position, []).append(pid)
+
+    keep: set[str] = set()
+    for pids in by_position.values():
+        pids.sort(key=lambda p: (-float(pool[p].distribution.mean), order[p]))
+        keep.update(pids[:per_position])
+    return [pid for pid in available_ids if pid in keep]

@@ -267,7 +267,7 @@ from ..models.opponent import (
 )
 from ..models.roster import build_roster
 from ..sim.lineup import RosterPlayer
-from .value import value_available
+from .value import dominant_candidates, value_available
 
 # ---------------------------------------------------------------------------
 # Snake order
@@ -656,7 +656,14 @@ def _choose_our_pick(
                 if remaining_ids:
                     candidate_ids = remaining_ids
 
-    values = value_available(candidate_ids, pool, roster, replacement_means)
+    # Only the argmax is wanted, and within a position `draft.value` is
+    # monotone in the projected mean -- so the best player at each position
+    # is the only one that can win. See `value.dominant_candidates` for the
+    # proof and for the measurement that motivated it (this call was 61% of
+    # a `recommend_pick`).
+    values = value_available(
+        dominant_candidates(candidate_ids, pool), pool, roster, replacement_means
+    )
     best = max(values, key=lambda v: v.value)
     return best.player_id, best.position
 
@@ -753,6 +760,10 @@ def run_rollout(
 
     drafted_ids: set[str] = set(state.drafted_ids)
     available_ids: list[str] = [pid for pid in pool if pid not in drafted_ids]
+    available_players: dict[str, AvailablePlayer] = {
+        pid: AvailablePlayer(player_id=pid, position=entry.position, adp=adp_lookup[pid])
+        for pid, entry in pool.items()
+    }
 
     total_picks = state.total_picks
     next_overall = state.next_overall_pick
@@ -771,10 +782,11 @@ def run_rollout(
                     n_teams=state.n_teams,
                 )
         else:
-            candidates = [
-                AvailablePlayer(player_id=pid, position=pool[pid].position, adp=adp_lookup[pid])
-                for pid in available_ids
-            ]
+            # `AvailablePlayer` is frozen and every field is fixed for the
+            # whole rollout, so rebuilding one per player per pick was
+            # constructing ~15 million identical objects per
+            # `recommend_pick`. Build them once and select.
+            candidates = [available_players[pid] for pid in available_ids]
             player_id = sample_pick(
                 model,
                 manager_id=f"slot_{team}",

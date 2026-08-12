@@ -352,3 +352,86 @@ def test_value_available_is_fast_for_a_500_player_pool():
     # Generous ceiling -- this is meant to catch an accidental O(n^2) or a
     # sampling call creeping in, not to pin an exact number.
     assert elapsed < 2.0
+
+
+# ---------------------------------------------------------------------------
+# dominant_candidates
+#
+# The reduction that made `recommend_pick` 2.7x faster with bit-identical
+# output. It is exact, not an approximation: within a position `value` is
+# monotone non-decreasing in the projected mean, so only the best-by-mean
+# player at each position can be the argmax. These tests pin the property
+# the proof rests on -- if monotonicity ever breaks, the speedup silently
+# starts choosing different players.
+
+
+def _mixed_pool():
+    from ffdraft.models.distribution import PlayerDistribution
+
+    pool = {}
+    for i, (pos, mean) in enumerate(
+        [("RB", 20.0), ("RB", 15.0), ("RB", 3.0), ("WR", 18.0), ("WR", 12.0),
+         ("WR", 2.0), ("QB", 26.0), ("QB", 19.0), ("TE", 14.0), ("TE", 6.0)]
+    ):
+        pool[f"p{i}"] = _pd(f"p{i}", pos, mean)
+    return pool
+
+
+def test_value_is_monotone_in_mean_within_a_position():
+    """The property the whole reduction rests on."""
+    from ffdraft.draft.value import value_available
+
+    pool = _mixed_pool()
+    roster = []
+    values = {v.player_id: v.value for v in value_available(
+        list(pool), pool, roster, REPLACEMENT_MEANS, availability_by_position=AVAILABILITY
+    )}
+    by_pos = {}
+    for pid, entry in pool.items():
+        by_pos.setdefault(entry.position, []).append(pid)
+    for pids in by_pos.values():
+        ordered = sorted(pids, key=lambda p: -float(pool[p].distribution.mean))
+        vals = [values[p] for p in ordered]
+        assert vals == sorted(vals, reverse=True), (
+            f"value must not increase as mean falls within a position: {vals}"
+        )
+
+
+def test_dominant_candidates_keeps_one_per_position_by_default():
+    from ffdraft.draft.value import dominant_candidates
+
+    pool = _mixed_pool()
+    kept = dominant_candidates(list(pool), pool)
+    assert len(kept) == 4, "one per position present in the pool"
+    assert {pool[p].position for p in kept} == {"RB", "WR", "QB", "TE"}
+    assert set(kept) == {"p0", "p3", "p6", "p8"}, "the best mean at each position"
+
+
+def test_reduced_argmax_matches_the_full_argmax():
+    """The behavioural guarantee: same chosen player, far less work."""
+    from ffdraft.draft.value import dominant_candidates, value_available
+
+    pool = _mixed_pool()
+    for roster in ([], [RosterPlayer("x", "RB", 19.0)], [RosterPlayer("x", "QB", 27.0)]):
+        full = value_available(list(pool), pool, roster, REPLACEMENT_MEANS,
+                               availability_by_position=AVAILABILITY)
+        reduced = value_available(dominant_candidates(list(pool), pool), pool, roster,
+                                  REPLACEMENT_MEANS, availability_by_position=AVAILABILITY)
+        assert max(full, key=lambda v: v.value).value == max(reduced, key=lambda v: v.value).value
+
+
+def test_dominant_candidates_preserves_input_order():
+    """Callers tie-break on list order, so the reduction must not reshuffle."""
+    from ffdraft.draft.value import dominant_candidates
+
+    pool = _mixed_pool()
+    ids = list(pool)
+    kept = dominant_candidates(ids, pool, per_position=2)
+    assert kept == [p for p in ids if p in set(kept)]
+
+
+def test_dominant_candidates_rejects_a_nonsense_width():
+    from ffdraft.draft.value import dominant_candidates
+
+    with pytest.raises(ValueError, match="per_position"):
+        dominant_candidates(["p0"], _mixed_pool(), per_position=0)

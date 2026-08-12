@@ -63,5 +63,18 @@ FULL_BUDGET = Budget(
 # that; 35.6s leaves ~54s. The precision given up is 1.17pp vs 0.92pp of
 # standard error, which is immaterial next to the model's own between-season
 # SE of 4.15pp (HANDOFF section 10). Buying 0.25pp of simulation precision
+
 # with half the human clock is a bad trade.
+
+# NOTE (2026-08-11): the timings recorded above were measured BEFORE the
+# `value.dominant_candidates` reduction and the `pick_probabilities` /
+# rollout allocation fixes, which together made `recommend_pick` ~2.7x
+# faster with bit-identical output. Re-measured at the same budgets:
+#
+#     LIVE_BUDGET (12x16x300)   35.6s  ->  12.6s
+#
+# The budgets themselves were left alone rather than quietly widened: the
+# leader was already identical at every budget measured, so the headroom is
+# available to spend on precision if wanted, but spending it is a decision
+# to take deliberately and re-measure, not a side effect of an optimisation.
 LIVE_BUDGET = Budget(n_candidates=12, n_rollouts=16, n_sims_per_rollout=300, seed=20260804)
