@@ -134,12 +134,34 @@ def main() -> None:
         undrafted = {
             pid: p for pid, p in ctx.pool.items() if pid not in board.drafted_ids
         }
+        # Ordered by ADP, not by board rank. This list is used to record what
+        # *other managers* just did, and they draft off ADP -- so ADP order is
+        # what puts the player who actually went near the top. The two differ
+        # by 20.7 places on average in the 2026 pool (board rank is consensus
+        # expert rank): Gibbs is ADP 1.6 but board #3, and Cincinnati's D/ST
+        # is ADP 174 but board #404, which is a long scroll under a clock.
+        #
+        # Both numbers are in the label so the ordering is never mysterious,
+        # and because the recommendation table is ranked on the model's own
+        # value -- seeing the market number beside it is the fastest way to
+        # notice the tool is reaching.
+        adp_lookup = _adp_lookup(ctx)
         labels = {
-            f"{p.name} ({p.position}) #{p.rank}": pid for pid, p in undrafted.items()
+            f"{p.name} ({p.position}) #{p.rank}"
+            + (f" · adp {adp_lookup[pid]:.1f}" if pid in adp_lookup else " · adp —"): pid
+            for pid, p in undrafted.items()
         }
         choice = st.selectbox(
             "Player taken",
-            sorted(labels, key=lambda label: ctx.pool[labels[label]].rank),
+            # Players with no ADP sort last, in board-rank order, rather than
+            # being silently dropped or floated to the top by a 0 default.
+            sorted(
+                labels,
+                key=lambda label: (
+                    adp_lookup.get(labels[label], float("inf")),
+                    ctx.pool[labels[label]].rank,
+                ),
+            ),
             index=None,
             key=f"pick_{board.next_overall_pick}",
             disabled=board.is_complete,
