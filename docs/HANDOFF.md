@@ -633,7 +633,55 @@ engine - adp = +1.27pp (between-season SE 5.17pp), 3 of 5 seasons
 
 **Leak, named because it is mine:** `backtest.fit_holdout_context` correctly refits the *reach* model through the prior season only, but `TEMPERATURE_BY_ROUND` is a module constant fit on all of 2018-2024 — **including every holdout season**. The gate numbers above are therefore leaky. Two things bound the damage: it does not touch draft-day use (2026 is outside the fitting range), and it cannot have flattered us, since both contenders face the same simulated opponents and it was **ADP** that gained most (2024: 10.00% → 20.67%). Fixing it properly means threading a per-holdout schedule through `run_rollout` and moving the likelihood replay out of `scripts/` into `src/` — recorded as an open item, not half-done.
 
-**Also worth noticing in that table:** ADP's own championship rate rises monotonically across holdouts, 9.67% → 20.67%. That trend is not explained and predates this change in direction; it deserves its own look before any gate number is trusted.
+**Also worth noticing in that table:** ADP's own championship rate rises monotonically across holdouts, 9.67% → 20.67%. *(Followed up 2026-08-12, §7e: that trend is caused by this very schedule — ADP is flat under the old flat temperature. The guess here that it "predates this change" was wrong.)*
+
+## 7e. The engine collapses in the two most recent seasons — 2026-08-12
+
+**This displaces every other open item.** It is the only finding on this page that bears directly on whether to trust the tool on draft day, and it survives both opponent models.
+
+```
+engine championship rate      2020-22   ->   2023-24
+  flat temperature (old)       17.44%        6.50%
+  fitted schedule (new)        21.11%        7.17%
+```
+
+Per season, with the fitted schedule:
+
+```
+season   engine      adp    engine-adp
+2020     20.67%    9.67%      +11.00pp
+2021     20.00%   10.00%      +10.00pp
+2022     22.67%   15.00%       +7.67pp
+2023      7.33%   16.00%       -8.67pp
+2024      7.00%   20.67%      -13.67pp
+```
+
+**The headline "+1.27pp edge over ADP" is an average across two opposite regimes.** The engine wins 2020-2022 and loses 2023 and 2024 — and those two are the seasons most like 2026. Averaging them produces a small positive number that conceals a sign flip. Do not quote the pooled figure without this table beside it.
+
+Nothing yet explains the collapse. It is **not** the temperature schedule (it predates it, at a similar magnitude) and **not** ADP coverage (see below). Candidates worth testing, in no particular order: something in the 2023+ player pools that the value function handles badly; the rank-curve/replacement fits degrading as they take on more seasons; or 2023-24 simply being "chalk" years where consensus was accurate and a contrarian engine had nothing to find.
+
+### The "ADP rises monotonically" trend was mine, not the data's
+
+Recorded here because it was briefly promoted to a top open item and is now retired.
+
+```
+                    2020   2021   2022   2023   2024   corr w/ season
+adp, flat temp      8.00  11.67   8.33  11.33  10.00      +0.345
+adp, fitted sched.  9.67  10.00  15.00  16.00  20.67      +0.967
+```
+
+ADP-following was flat under the old flat temperature. The **per-round temperature schedule (§7d) is what made it trend** — possibly compounded by that schedule's known leak (fit on 2018-2024, including every holdout; open item 2a). This is not evidence about the seasons; it is evidence about a change I made.
+
+### ADP coverage is incomplete in every season, and badly so in 2022 — upstream
+
+- Each season has only **~200 real ADP rows against a ~637-player pool**. Everyone else gets an ADP *extrapolated* from a linear fit of ADP on board rank (`rollout._extrapolate_unmatched_adp`). This is documented and reasonable, but it means most of the board's ADP is synthetic in every backtest season.
+- **2022 is truncated to 157 rows** — fewer than the 180 picks a draft needs — with K at 5 and D/ST at 6 against ~14 apiece elsewhere. That season's late-round ADP is almost entirely extrapolated.
+- **This is upstream, not an ingest bug.** Queried live 2026-08-12: `fantasyfootballcalculator.com/api/v1/adp/ppr?year=2022` returns exactly 157 players (PK 5, DEF 6), matching our stored data row for row. 2021 returns 211 and 2023 returns 202. The same API already returns nothing at all for 2025 (see `sources/ffcalculator.py`), so upstream gaps are its established behaviour rather than a surprise.
+- Coverage does **not** trend across seasons, so it cannot explain the ADP trend above, and 2022 sits mid-sequence.
+
+### The `adp` and `consensus` contenders are the same policy
+
+They return byte-identical rates in all five seasons. `rankings_holdout` is built by sorting that season's ADP (`backtest._adp_ranked_frame`), so "best available by consensus rank" and "best available by ADP" are the same ordering. The summary table presents them as two baselines; they are one. Not a bug, but do not read their agreement as corroboration.
 
 ## 8. The recurring failure pattern — read this before trusting any number
 
@@ -924,15 +972,16 @@ Three defects were found by the owner reading a mock roster, not by any automate
 
 ### Current open items, in priority order
 
-**Nothing here blocks draft day.** Stages 1-4 are complete and the live tool runs. Items 1 and 2 are about whether the numbers on this page can be *believed*, which is a different question from whether the tool works.
+**The tool runs; whether it is any good is now the open question.** Stages 1-4 are complete and the live app works. Item 1 is about whether the engine actually beats doing nothing clever, which is more fundamental than anything below it.
 
-1. **ADP's championship rate rises monotonically across holdout seasons, and nothing explains it.** 9.67% → 10.00% → 15.00% → 16.00% → 20.67% across 2020-2024 (§7d). A strictly-ADP contender should not get steadily better at winning a simulated league; something is trending in the data or the harness. **This is the highest-priority item because `engine - adp` is the project's load-bearing number and this makes every instance of it suspect** — including the gate, the structure study, and both of 2026-08-09's measurements. Candidate causes worth eliminating first: ADP coverage/depth growing by season (`adp_history` row counts per season), the 17→18 round change in 2023, and whether `pool_adp_lookup`'s match rate improves over time.
+1. **THE ENGINE LOSES 2023 AND 2024 — see §7e.** Championship rate falls from ~21% (2020-22) to ~7% (2023-24) under *both* the old flat temperature and the new fitted schedule, so it is not an artifact of either. The pooled "+1.27pp over ADP" averages two opposite regimes and hides a sign flip in exactly the two seasons most like 2026 (2023: −8.67pp, 2024: −13.67pp). Unexplained. **Everything below is secondary**: there is little value in tuning a component while the whole loses the most recent seasons. Start by checking whether the collapse tracks the player pool, the fits that grow with each added season, or simply how "chalk" those two seasons were.
 2. **The backtest leaks the temperature schedule.** `TEMPERATURE_BY_ROUND` is fit on 2018-2024 — including every holdout — while `backtest.fit_holdout_context` correctly refits only the reach model through the prior season. Fix by threading a per-holdout schedule through `run_rollout` and moving the likelihood replay out of `scripts/fit_temperature.py` into `src/`. **Does not affect draft-day use** (2026 is outside the fitting range), and it cannot have flattered the engine — both contenders share the simulated opponents, and ADP gained most. But no holdout number involving the opponent model is clean until this is done.
 3. **Item 4** — state-dependent between-rollout variance.
 4. **Item 6** — pin smaller budgets in the two slow real-data tests (suite is ~7:20, 426 tests).
 5. **Item 7** — `sources/nflverse.py` → `models/kicking.py` layering inversion.
-6. **Replacement-level uncertainty** — the experiment whose rationale was retracted (§10c). Run it with no predicted direction, or drop it.
-7. **Three players remain unmatched** (Tommy Myers, Jordan Waters, Elijah Tau-Tolliver), all rank 441+. Genuinely absent from nflverse; no alias helps. If one is drafted, **they cannot be entered** and the board will drift. The owner declined the UI escape hatch that would fix this.
+6. ~~**ADP's championship rate rises monotonically across holdouts.**~~ **EXPLAINED 2026-08-12, §7e — the trend was caused by the temperature schedule, not by the data.** ADP-following is flat under the old flat temperature (corr with season +0.345) and steeply rising under the fitted schedule (+0.967). Related but separate: ADP coverage is genuinely incomplete — ~200 real rows per season against a ~637-player pool, and only 157 in 2022 (K 5, D/ST 6). Verified upstream: the Fantasy Football Calculator API itself returns 157 for 2022, so this is the source's gap, not our ingest. Coverage does not trend, so it explains neither the rise nor §7e.
+7. **Replacement-level uncertainty** — the experiment whose rationale was retracted (§10c). Run it with no predicted direction, or drop it.
+8. **Three players remain unmatched** (Tommy Myers, Jordan Waters, Elijah Tau-Tolliver), all rank 441+. Genuinely absent from nflverse; no alias helps. If one is drafted, **they cannot be entered** and the board will drift. The owner declined the UI escape hatch that would fix this.
 
 ### Closed 2026-08-09
 
