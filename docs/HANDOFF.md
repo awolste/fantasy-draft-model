@@ -683,6 +683,38 @@ ADP-following was flat under the old flat temperature. The **per-round temperatu
 
 They return byte-identical rates in all five seasons. `rankings_holdout` is built by sorting that season's ADP (`backtest._adp_ranked_frame`), so "best available by consensus rank" and "best available by ADP" are the same ordering. The summary table presents them as two baselines; they are one. Not a bug, but do not read their agreement as corroboration.
 
+### Dig into 7e, round 1 — 2026-08-12. Two structural findings, one dead end.
+
+`scripts/diagnose_season_break.py` and the allocation/sweep runs behind it.
+
+**1. Within a position, the model's ordering IS ADP's ordering.** Not similar — identical. The model-vs-ADP top-quintile hit rate differs by **+0% in every position in all five seasons**, and within-position Spearman differences are ±0.02. This is structural, not a five-point inference: for a historical holdout, `rankings_holdout` is built by sorting that season's ADP (`backtest._adp_ranked_frame`), and `PlayerDistribution.mean` is a monotone function of positional rank, so the two orderings cannot disagree.
+
+**The consequence is large: in the backtest the engine cannot out-pick ADP within a position. Positional allocation is its only lever.** Any explanation of §7e has to be an allocation story, and any "better projections" story is ruled out by construction. (The live 2026 pool uses real FantasyPros ECR, which is *not* built from ADP, so this is a property of the backtest, not of draft day — but it means the backtest cannot validate projection quality at all.)
+
+**2. The ADP baseline never drafts a quarterback**, and that is a flaw in the project's load-bearing number.
+
+```
+season  arm      1st QB rd    QB   RB   WR   TE
+2023    engine        1.6    3.0  4.0  8.0  2.0
+2023    adp          45.5    0.9  6.9 10.1  0.2
+2024    adp          62.4    0.5  7.1 10.3  0.1
+```
+
+`adp_pick_policy` takes the lowest-ADP player available with no roster constraint, so over 18 rounds it takes almost only RB/WR and then starts a **free replacement-level QB (~18 ppg)** every week. That is not a manager following ADP; it exploits the replacement mechanic. `engine - adp` compares against a strategy no human would run, and the baseline gets *stronger* the more generous replacement level is. Fix before quoting the gate again: give the ADP policy the same roster constraints a real manager has.
+
+**3. Dead end: the QB tilt is NOT what breaks 2023-24.** The obvious hypothesis — the engine drafts 3.0 QBs every season and takes the first one earlier each year (round 4.0 → 2.3 → 1.2 → 1.6 → 1.4) while QB replacement rose (16.36 in 2022 → 20.11 in 2024) — is wrong. Re-pricing QB replacement by +2.15 in the value function cuts QBs drafted from 3.00 to 0.99 and makes the collapse **worse**:
+
+```
+season    delta=0.0   delta=2.15
+2022        23.00%      17.00%
+2023         8.50%       6.00%
+2024         8.50%       7.50%
+```
+
+Recorded so it is not retried. Note this is the per-season view §10c never printed; its pooled mean averaged the two regimes and hid both the collapse and this result.
+
+**Still unexplained.** The engine's allocation is near-constant across seasons (3 QB, 2 TE, ~4 RB, ~8 WR) while ADP's swung from RB-heavy (RB 10 / WR 6 in 2020-22) to WR-heavy (RB 7 / WR 10 in 2023-24). The next thing to measure is where the realized starting-lineup points actually go, by position, engine vs ADP, in a season it wins (2022) against one it loses (2023) — that says whether the engine is drafting a worse roster or a differently-shaped one that scores the same and wins less.
+
 ## 8. The recurring failure pattern — read this before trusting any number
 
 **Every genuine defect in this project produced plausible-looking output and raised no errors.** None were found by reading code. All were found by checking a reported number against raw data or against the artifact that actually mattered.
@@ -974,7 +1006,7 @@ Three defects were found by the owner reading a mock roster, not by any automate
 
 **The tool runs; whether it is any good is now the open question.** Stages 1-4 are complete and the live app works. Item 1 is about whether the engine actually beats doing nothing clever, which is more fundamental than anything below it.
 
-1. **THE ENGINE LOSES 2023 AND 2024 — see §7e.** Championship rate falls from ~21% (2020-22) to ~7% (2023-24) under *both* the old flat temperature and the new fitted schedule, so it is not an artifact of either. The pooled "+1.27pp over ADP" averages two opposite regimes and hides a sign flip in exactly the two seasons most like 2026 (2023: −8.67pp, 2024: −13.67pp). Unexplained. **Everything below is secondary**: there is little value in tuning a component while the whole loses the most recent seasons. Start by checking whether the collapse tracks the player pool, the fits that grow with each added season, or simply how "chalk" those two seasons were.
+1. **THE ENGINE LOSES 2023 AND 2024 — see §7e.** Championship rate falls from ~21% (2020-22) to ~7% (2023-24) under *both* the old flat temperature and the new fitted schedule, so it is not an artifact of either. The pooled "+1.27pp over ADP" averages two opposite regimes and hides a sign flip in exactly the two seasons most like 2026 (2023: −8.67pp, 2024: −13.67pp). Partly narrowed 2026-08-12 (§7e, "round 1"): the engine can only differ from ADP by *positional allocation* (within a position their orderings are identical), the QB tilt has been ruled out as the cause, and the ADP baseline itself is flawed — it drafts no quarterback. Still unexplained. **Everything below is secondary**: there is little value in tuning a component while the whole loses the most recent seasons. Start by checking whether the collapse tracks the player pool, the fits that grow with each added season, or simply how "chalk" those two seasons were.
 2. **The backtest leaks the temperature schedule.** `TEMPERATURE_BY_ROUND` is fit on 2018-2024 — including every holdout — while `backtest.fit_holdout_context` correctly refits only the reach model through the prior season. Fix by threading a per-holdout schedule through `run_rollout` and moving the likelihood replay out of `scripts/fit_temperature.py` into `src/`. **Does not affect draft-day use** (2026 is outside the fitting range), and it cannot have flattered the engine — both contenders share the simulated opponents, and ADP gained most. But no holdout number involving the opponent model is clean until this is done.
 3. **Item 4** — state-dependent between-rollout variance.
 4. **Item 6** — pin smaller budgets in the two slow real-data tests (suite is ~7:20, 426 tests).
