@@ -1,6 +1,6 @@
 # Handoff — 2026 Fantasy Draft Optimizer
 
-**Last updated:** 2026-08-09
+**Last updated:** 2026-08-22
 **Repo:** https://github.com/awolste/fantasy-draft-model (public)
 **Read this first**, then `docs/superpowers/specs/2026-08-02-ff-draft-2026-design.md` for the design and `docs/superpowers/plans/README.md` for the stage roadmap and the running constraints list.
 
@@ -35,12 +35,17 @@ Full K and DST scoring rules are in the spec. Two bands are **neutral, not missi
 | 2 | Player + season model | **Complete**, merged to `main` |
 | 3 | Opponent model + optimizer | **Complete (7 of 7)**, merged to `main` |
 | 4 | Live draft assistant | **Complete** (live-only; + survival columns, position caps, scarcity tie-break) |
+| — | Draft-day aids | **Complete** — precomputed 6-round pick tree + interactive explorer (§14) |
 
-**All four stages are merged and pushed to `origin/main`. 421 tests pass in ~7:40** on the native arm64 venv. See §9/§10 for why the runtime was replaced (open item 8 closed) and §11 for the live assistant.
+**All four stages are merged and pushed to `origin/main`. 437 tests pass in ~3:20** on the native arm64 venv (both numbers improved 2026-08-11: `recommend_pick` is 10.7x faster with bit-identical output, §15).
+
+> **Read §7e before trusting any performance claim on this page.** The engine wins 2020-2022 and *loses* 2023 and 2024, and the pooled edge over ADP averages those two opposite regimes together. The two seasons most like 2026 are the two it loses. This is open item 1 and it is unresolved.
+
+See §9/§10 for why the runtime was replaced (open item 8 closed) and §11 for the live assistant.
 
 Stage 3 is **complete**. Task 7, the structure study, is **answered, in two parts**: among RB/WR orderings draft structure does *not* matter (0RB, Hero RB and 2RB:1WR are statistically indistinguishable), but **taking a QB or elite TE in rounds 1-3 is measurably worse** — 9 of 9 comparisons favour a skill-only start, one at 3.6 sigma. See §7c.
 
-Task 6 (the backtest) is done. Its original verdict was: *the engine loses to naive ADP-following on real 2024 results by 13.5pp ± 1.65pp*. **That verdict has since been overturned — see §7b tests 6-9.** Two things were wrong with it. (a) ~6pp of the deficit was an artifact of the scoring rule: `real_season_champion` set lineups with perfect hindsight, which pays FLEX depth a premium no real manager could collect. That is now fixed. (b) 2024 is the worst of the five usable holdout seasons for this engine. Re-run across 2020–2024 through the fixed production path, **the engine beats ADP in three of five seasons and averages +2.45pp against a between-season SE of 4.27pp** — not broken, but not demonstrated either.
+Task 6 (the backtest) is done. Its original verdict was: *the engine loses to naive ADP-following on real 2024 results by 13.5pp ± 1.65pp*. **That verdict has since been overturned — see §7b tests 6-9.** Two things were wrong with it. (a) ~6pp of the deficit was an artifact of the scoring rule: `real_season_champion` set lineups with perfect hindsight, which pays FLEX depth a premium no real manager could collect. That is now fixed. (b) 2024 is the worst of the five usable holdout seasons for this engine. Re-run across 2020–2024 through the fixed production path, **the engine beats ADP in three of five seasons and averages +2.45pp against a between-season SE of 4.27pp** — not broken, but not demonstrated either. **Superseded 2026-08-12, §7e: that pooled average conceals a sign flip.** The engine wins 2020-2022 and loses 2023 (−8.67pp) and 2024 (−13.67pp), and the ADP baseline it is measured against never drafts a quarterback.
 
 **Quote ex-ante, multi-season numbers. Do not quote the single-season 2024 figure**, and do not repeat "the engine loses to ADP by 13.5pp" — that number is now known to be mostly artifact.
 
@@ -114,7 +119,7 @@ Since commit `2b845cc`, lineups are chosen on **projected means** and scored on 
 
 **Nothing is blocking a deliverable. Stages 1-4 are complete, merged and pushed.**
 
-1. ~~Task 6: the engine loses the backtest by 13.5pp.~~ **RESOLVED — the verdict was wrong.** ~6pp was a hindsight-scoring artifact (now fixed) and 2024 was the worst of five usable holdouts. Multi-season, ex-ante, through the production path: **engine − ADP = +2.86pp, between-season SE 4.15pp, beating ADP in 3 of 5 seasons.** Not broken; not demonstrated either. §7b tests 6-9, §10.
+1. ~~Task 6: the engine loses the backtest by 13.5pp.~~ **RESOLVED — the verdict was wrong.** ~6pp was a hindsight-scoring artifact (now fixed) and 2024 was the worst of five usable holdouts. Multi-season, ex-ante, through the production path: **engine − ADP = +2.86pp, between-season SE 4.15pp, beating ADP in 3 of 5 seasons.** §7b tests 6-9, §10. **Do not quote that figure as a current result — see §7e**: it averages two opposite regimes, and the engine loses both of the most recent seasons.
 
 2. ~~Task 7: the structure study has not been run.~~ **RESOLVED, in two parts.** Among RB/WR orderings, structure does not matter (all pairwise gaps ≤1.75pp against SEs of 1.4-2.9). But **taking a QB or elite TE in rounds 1-3 is measurably worse** — 9 of 9 comparisons favour a skill-only start, strongest at 3.6 sigma. §7c and its 2026-08-09 extension.
 
@@ -142,7 +147,7 @@ In real drafts those top-4 numbers are close to zero — nobody passes on the co
 3. **QB=3 and K=2 are cap-bound in every rollout.** The value function still ranks a third QB and second kicker above better alternatives; a policy guard (`MAX_EXTRA_BENCH_NO_FLEX`) is the only thing stopping it. That is masking, not fixing, and costs ~2 roster spots versus opponents' 1.7 QB / 1.2 K. `value.py` has been through three fix rounds; a fourth patch is probably the wrong move — consider whether greedy marginal value is the right policy at all.
 4. **Between-rollout variance appears state-dependent and is unresolved.** Measured 3.50pp at pick 8 (n=50) but 5.97pp in an independent 10-seed check at a different state. The staleness guard catches drift over time but will not tell you the allocation is too tight at some other draft state.
 5. ~~A recommendation costs ~5.6 minutes, too slow for a live draft.~~ **RESOLVED in Stage 4 (§11).** Full budget is now ~197s on native ARM, and the live tool uses a measured reduced budget (12×16×300) costing 35.7s at our worst pick and 13.1s at our last. Precompute was built and dropped after measuring a 9–17% hit rate.
-6. **Test suite takes ~7:40** for 421 tests (was ~12 min under Rosetta). Still dominated by the pick-8/pick-13 real-data tests running full production budgets; pinning a smaller explicit budget there is still worth doing.
+6. **Test suite takes ~3:20** for 437 tests (was ~7:40 before the 2026-08-11 speedup, §15; ~12 min under Rosetta). Still dominated by the pick-8/pick-13 real-data tests running full production budgets; pinning a smaller explicit budget there is still worth doing.
 7. **`sources/nflverse.py` imports `models/kicking.py`** — a Stage 1 → Stage 2 layering inversion. Cheap to fix by moving `kicking.py` beside `scoring.py`.
 8. ~~Python runs under Rosetta x86-64 emulation.~~ **RESOLVED 2026-08-08.** Native arm64 CPython 3.11.15 installed via `uv python install cpython-3.11-macos-aarch64-none`; `.venv` is now native and the x86_64 one is deleted. Suite went 11:30 → ~7:40, and the intermittent native crashes and silent numeric corruption are gone (§10b, §10c). Never set `POLARS_SKIP_CPU_CHECK=1`.
 
@@ -748,8 +753,38 @@ ESPN cookies come from a logged-in browser: DevTools → Application → Cookies
 
 ```bash
 .venv/bin/python scripts/ingest_all.py    # pull + validate all nine datasets
-.venv/bin/pytest                          # ~12 minutes
+.venv/bin/pytest                          # ~3:20
 ```
+
+### Draft-morning refresh (no ESPN cookies needed)
+
+ADP and rankings are **snapshots, not live fetches** — the app reads `data/*.parquet`. They go stale fast in August: measured 2026-08-22 against a 14-day-old snapshot, the 2026 board had moved a mean of 6.0 places with individual swings of 20-30. Refresh just those two, which needs neither ESPN cookies nor the nflverse download:
+
+```bash
+.venv/bin/python -c "from ffdraft.sources import fantasypros, ffcalculator; fantasypros.ingest(); ffcalculator.ingest()"
+```
+
+**That will trip `CacheStaleError` on the next run — expected, not a break.** Four caches fingerprint against the refreshed inputs, and the suite fails ~42 tests in 15s until they are refit. Refit them explicitly (3s), then rebuild the tree (~6 min):
+
+```bash
+.venv/bin/python -c "
+from ffdraft import store
+from ffdraft.models.availability import load_or_fit_availability_rates
+from ffdraft.models.replacement import load_or_fit_replacement_values
+from ffdraft.models.tier_shape import load_or_fit_tier_shapes
+from ffdraft.models.rank_curve import load_or_fit_rank_curves
+load_or_fit_availability_rates(force_refit=True)
+load_or_fit_replacement_values(force_refit=True)
+w = store.read('weekly_stats'); a = store.read('adp_history')
+load_or_fit_tier_shapes(w, force_refit=True)
+load_or_fit_rank_curves(a, w, store.read('rankings_2026'), force_refit=True)
+load_or_fit_rank_curves(a, w, force_refit=True)"
+.venv/bin/python scripts/build_pick_tree.py && .venv/bin/python scripts/build_pick_tree_page.py --out pick_tree.html
+```
+
+**The sources are current; only our snapshot ages.** Verified 2026-08-22 by reading the API's own metadata rather than assuming: Fantasy Football Calculator reports a rolling **7-day window (2026-08-15 → 2026-08-22) over 7,288 drafts**.
+
+**Both sources are PPR and both assume 4-point passing TDs.** `ADP_URL` is `/api/v1/adp/ppr` (the API echoes `type: PPR`) and ECR is `ppr-cheatsheets.php`; the league is full PPR (`rec: 1.0`) but pays **6** for a passing TD. That divergence is the project's designed edge and is corrected in the player model, not in the sources — see `sources/fantasypros.py`. It is also the origin of the QB tilt (§7c, §7e).
 
 Caches are fingerprinted against their inputs and **raise `CacheStaleError`** if the underlying data changed — deliberately loud rather than silently refitting, because a silent refit inside a rollout loop would be an invisible performance cliff. Rank-curve caches are namespaced by rankings context so the 2026 pool and a historical backtest pool coexist without evicting each other.
 
@@ -956,6 +991,22 @@ Only the two live sources moved (FantasyPros −2 ranked players, FFC +10 in 202
 
 Stage 4's spec, plan and several §-headers are dated **2026-08-04**; the actual date was **2026-08-08**. A session-start hook reported the earlier date and it was taken at face value. Filenames are left alone to avoid breaking links — treat every "2026-08-04" in Stage 4 material as 2026-08-08.
 
+### Refresh — 2026-08-22 (ADP + rankings only)
+
+`fantasypros.ingest()` and `ffcalculator.ingest()`, not the full `ingest_all.py` — neither needs ESPN cookies or the nflverse pull.
+
+| dataset | before | after |
+|---|---|---|
+| `rankings_2026` | 515 | 513 |
+| `adp_2026` | 256 | 266 |
+| `adp_history` | 1375 | 1375 (values unchanged, see below) |
+
+The 2026 board had moved in 14 days: **mean 6.0 places**, swings of 20-30 (Caleb Williams −17.7, Pat Freiermuth +33.8, Wan'Dale Robinson +15.2). After name normalisation, **24 true adds and 14 true drops** (Aiyuk and Keenan Allen in; Pearsall, Mooney, Geno Smith out). Pool rebuilt to 509 players, all 509 ADP-matched, 4 excluded as unmatched.
+
+**`adp_history` changed only in the `name` column — not one ADP value moved.** Finished seasons are fixed; the churn was spelling ("Brian Robinson Jr." → "Brian Robinson"). Worth knowing because **a raw-name diff makes those look like players dropping off the board when they have not** — normalise before comparing.
+
+Refreshing invalidated four fingerprinted caches and the suite failed 42 tests in 15s. That is `CacheStaleError` working as designed. Refit explicitly (3s), 437 tests pass, tree rebuilt (343s). Commands in §9.
+
 ## 13. Session log — 2026-08-08/09
 
 The session that took the project from "Stage 3 incomplete, engine apparently broken" to all four stages complete and pushed. Recorded because most of the value was **negative results and overturned conclusions**, which are the easiest things for a future reader to re-derive by accident.
@@ -1021,3 +1072,60 @@ Three defects were found by the owner reading a mock roster, not by any automate
 - ~~**Item 3b — pick-dependent opponent-model temperature.**~~ **Fixed, see §7d.** `TEMPERATURE_BY_ROUND` replaces the flat 3.0; held-out LL +1.72/pick in 7/7 seasons, board-realism error halved. The gate is statistically unchanged (+1.27pp vs +2.86pp, SE ~5pp): this bought simulation fidelity, not edge. It created open items 1 and 2 above.
 
 > **Every measurement taken before 2026-08-09 used the flat temperature**, including §7c's structure study and its resolution. Their *conclusions* stand — the opponent environment was shared by every contender — but their exact numbers would move on a re-run. Re-derive rather than quote them if a decision turns on the precise value.
+
+## 14. The precomputed pick tree — 2026-08-11, rebuilt 2026-08-22
+
+`scripts/build_pick_tree.py` → `data/pick_tree.json` → `scripts/build_pick_tree_page.py` → `pick_tree.html`.
+
+A decision tree over our **first six picks** at slot 8 (overall 8, 13, 28, 33, 48, 53); a path through it is a complete plan for rounds 1-6. 189 nodes from 94 `recommend_pick` calls at the same `LIVE_BUDGET` the app uses, so the tree says what the app would say rather than something cheaper.
+
+**Only our own choices branch.** Opponent behaviour between our picks is integrated out into `p_available`, measured over 200 separate opponent simulations. **That is the number that says whether a branch is real** — a node at 15% is a contingency to recognise, not a plan. The board each column is evaluated on is one representative opponent draft; `p_available` is the honest correction to that, and it is stated on the page rather than hidden.
+
+Roster shape is enforced by *feasibility*, not a fixed pattern: a position is offered only when some legal final split (RB in 2..4, RB+WR=6) is still reachable, so 3/3, 4/2 and 2/4 all stay open. Since 3+3 = 6 that makes all six picks RB or WR — independently what §7c concluded for rounds 1-3.
+
+**`recommend_pick` gained `restrict_to_positions` for this, and it was necessary rather than convenient.** At pick 28 the entire pruned candidate list came back QB and TE — the value-function tilt (§7c) biting exactly where documented — and filtering the *output* cannot recover a candidate that was never simulated. It restricts **pruning only**; rollouts, opponents and scoring are untouched, so each candidate's championship probability still accounts for every position we might take later. Inert when omitted, pinned by a test.
+
+**Round 1 on the 2026-08-22 board:** Chase 30.7% (23% available), McCaffrey 27.9% (42%), Taylor 25.8% (51%). On the two-week-older board it was Chase / St. Brown / Lamb — **the tree is worth rebuilding whenever the data is refreshed**, since two weeks of movement replaced two of the three round-1 options.
+
+### The page shipped blank once. Read this before trusting a generated artifact.
+
+`PAGE` was a normal Python string, so every `\n` written inside the JavaScript became a literal newline, splitting `lines.join("\n")` into an unterminated string. The whole script failed to parse and the page rendered **completely blank** — no error, nothing to click. It is a raw string now.
+
+**How it shipped matters more than the typo.** The page was "verified" by pasting an equivalent script into a live browser and watching it work — the preview pane strips inline scripts, so the real artifact was never executed even once. Verifying a retyped copy of a deliverable is not verifying the deliverable. `build_pick_tree_page.py` now runs `node --check` on its own output and refuses to write a page that does not parse (proven by reintroducing the bug: exit 1, no file written).
+
+## 15. Performance — `recommend_pick` is 10.7x faster, bit-identical — 2026-08-11
+
+34.2s → 3.2s at `LIVE_BUDGET`, verified against the *original* serial code at picks 8, 28 and 53: every candidate, championship probability and standard error identical. The test suite dropped 7:25 → 3:20 as a side effect.
+
+Profiling, not guessing, found 61% of a call in one place: `value_available` scored the **entire ~380-player pool** at every one of our future picks inside every rollout — 1,239,614 `solve_lineup` calls — when `_choose_our_pick` wants only the argmax.
+
+1. **`value.dominant_candidates` (exact, ~2.7x).** Within a position, value is monotone non-decreasing in projected mean — `lineup_marginal` because any slot open to a lower-mean player is open to a higher-mean one at a higher score; `bench_value` because `over_replacement` rises while the "ahead" set can only shrink; and `max()` preserves monotonicity. So the argmax over 380 players is the argmax over the best-by-mean player at each position — six of them. Zero of 216 real states picked a different player. `prune_candidates` gets its top-k the same way, with the zero-value tail reconstructed exactly (by rounds 17-18 fewer than `n_candidates` players have positive value, so that tail is a tie among zeros broken over the *whole* pool).
+2. **Two pure refactors (~1.45x).** `pick_probabilities` called `predicted_reach` 12.4M times for six distinct values (it depends only on position); `run_rollout` rebuilt ~15M identical frozen `AvailablePlayer` objects. Also `run_rollout` re-ran `pool_adp_lookup` — a polars join over the whole pool — 192 times per call for an answer that cannot change.
+3. **Parallel candidates (~3.7x).** Candidates are independent and share their random seeds, drawn in the parent, so this cannot move a number.
+
+**Parallelism is opt-in and OFF by default, deliberately.** Every start method available on macOS rebuilds a worker's namespace by executing the *main module*, so a caller without an `if __name__ == "__main__"` guard re-runs its own script in every worker — measured: a guardless script ran itself three times and finished **slower than serial** (44.9s vs 13.6s) while still printing the right answer. **A Streamlit script never has that guard**, so the live app stays serial (12.6s, comfortable against a 60-90s clock); batch scripts opt in with `n_workers=0`.
+
+Two dead ends recorded so they are not retried: `forkserver` does *not* avoid importing `__main__` (it only moves which process does it), and preloading this package into the forkserver crashed every worker on macOS (`+[NSCharacterSet initialize] may have been in progress in another thread when fork() was called`). Two safety rails: a worker never starts its own pool, and any pool failure falls back to serial with a `RuntimeWarning` — identical numbers, just slower. On draft day a broken pool must cost time, not the pick.
+
+**Budgets were deliberately NOT widened.** There is ~10x headroom now, but the leader was already identical at every budget measured, so spending it is a decision to take and re-measure, not a side effect of an optimisation.
+
+## 16. Session log — 2026-08-11/22
+
+**Shipped:** the pick tree and explorer (§14); the 10.7x speedup (§15); the fitted per-round opponent temperature (§7d); the player selector re-ordered by **ADP** with board rank beside it (it is used to record what *other* managers did, and they draft off ADP — the two disagree by 20.7 places on average, and Cincinnati's D/ST is ADP 174 vs board #404).
+
+**Investigated, not solved:** §7e. The engine's collapse in 2023-24 is real and robust across both opponent models. Ruled out: the temperature schedule, ADP coverage, and the QB tilt (re-pricing QB replacement by +2.15 cuts QBs drafted from 3.00 to 0.99 and makes those seasons *worse*).
+
+**Corrections I made to my own earlier claims** — the pattern worth carrying forward is that each was found by looking at data, not by re-reading code:
+
+| claimed | actually |
+|---|---|
+| "ADP's rising championship rate predates the temperature change" | It was *caused* by it. ADP is flat under the old flat temperature (corr +0.345) and steeply rising under the fitted schedule (+0.967). |
+| The `baseline` replacement fix is "a no-op" | It loses 4.40pp (2.1σ) — called off a top-40 board and a 25-seed smoke test, both too weak to see it. |
+| The guard's benefit tracks how often the engine takes QB/TE early | Falsified by 2022: the *most* early QB/TE and the guard's *worst* season. Two points looked like a relationship. |
+| The pick-tree page works (with screenshots) | It was blank. I verified a retyped copy, never the generated file. |
+
+**Two structural facts found while digging, both worth more than the bug that surfaced them:**
+
+- **In the backtest, the model's within-position ordering IS ADP's ordering** — identical, by construction. So the backtest can only ever validate *positional allocation*, never projection quality. Live 2026 uses real ECR, so this is a backtest property, not a draft-day one.
+- **The ADP baseline never drafts a quarterback** (0.5 QB, 0.1 TE in 2024) — it takes the lowest ADP available with no roster constraint and starts a free replacement-level QB. `engine - adp` is the load-bearing number and its denominator is a strategy no human would run.
+
