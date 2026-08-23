@@ -41,7 +41,23 @@ from ..draft.rollout import team_for_pick
 from ..league import DRAFT_ROUNDS
 from ..models.opponent import build_opponent_board, sample_pick_on_board
 
-DEFAULT_N_SIMS = 300
+# RAISED 300 -> 3000 on 2026-08-22, because `wait_cost_pp` became the
+# **primary tiebreaker** the app shows (`tiebreak.describe_tie` orders a
+# tie by it), so this simulation's noise now propagates straight into a
+# decision rather than sitting beside one.
+#
+# Measured at our pick 13 with 14 intervening picks -- the long wait, and
+# so the worst case -- as the SD of `p_survive` across 8 independent seeds:
+#
+#   n_sims    cost   SD of p_survive (mid-range players)
+#      300    0.28s   2.8pp        <- old: "49%" and "55%" were one number
+#     1000    0.88s   1.4pp
+#     3000    1.44s   0.9pp        <- now
+#
+# ~1.2s on a ~17s pick (HANDOFF section 15) against a 45s clock, to cut the
+# noise in the number the owner is told to decide on by roughly 3x. Cost is
+# sublinear in `n_sims` because building the opponent board is fixed cost.
+DEFAULT_N_SIMS = 3000
 # A candidate at or above this is worth deferring, and is eligible to be the
 # fallback in `wait_cost_pp`. Judgement, not a fitted value -- it only sets
 # which candidate the cost is measured against.

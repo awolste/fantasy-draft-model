@@ -962,7 +962,7 @@ Streamlit re-executes the entire script on every interaction. The first version 
 2. `.venv/bin/streamlit run src/ffdraft/live/app.py`
 3. Load the page **before** the draft starts — fitting the context takes a few seconds and is cached per session.
 4. Enter every pick as it happens, including opponents'. Undo fixes a mis-entry.
-5. At our pick the recommendation computes automatically (~17s at our first pick, less later — §15). Read the tie callout before the ranking: candidates flagged indistinguishable from the leader are equivalent, and the ordering among them is noise.
+5. At our pick the recommendation computes automatically (~17s worst case including survival, less later — §15). Read the tie callout before the ranking: candidates flagged indistinguishable from the leader are equivalent, and the ordering among them is noise.
 6. The **My team** column on the right is live at every pick, not just ours. Read its empty-slot warning before either of its point figures — early on, most of that total is replacement-level filler.
 
 ### The "My team" panel — 2026-08-22
@@ -1225,6 +1225,38 @@ So the checkmark meant "I cannot tell at this budget", not "these are equal" —
 > **The clock is 45s** (owner, 2026-08-22). §11's original reasoning assumed 90s; if the real clock differs again, re-run the ladder rather than interpolating — cost is not linear in any one knob.
 
 **Two consequences to know about.** `FULL_BUDGET` is now *smaller* than `LIVE_BUDGET` (487,500 vs 675,000 units of work), which inverted a test that asserted the opposite; it is pinned to `recommend_pick`'s defaults, which were derived from per-unit costs measured before the speedups and are deliberately **not** re-derived, because changing them would silently change the backtest too. And `scripts/build_pick_tree.py` runs at `LIVE_BUDGET` on purpose, so the tree build goes from ~5.7 minutes to roughly **25 minutes**. That is fine for a pre-draft artifact, but do not start it expecting the old number.
+
+
+### What is left, and what is not — measured 2026-08-22
+
+Asked directly: more parallelism, caching, other parameters? Measured so it is not re-derived.
+
+**Parallelism is at the ceiling.** One pick costs 110.8s serial and 16.0s on 8 workers — **6.9x, 87% efficiency**. Worker count was swept on this 10-core machine and `cpu_count() - 2` is right:
+
+| workers | 8 | 10 | 12 | 15 |
+|---|---|---|---|---|
+| time | **16.0s** | 17.4s | 31.2s | 27.5s |
+
+Oversubscription is sharply counterproductive. With 15 candidates over 8 workers the schedule is two waves at ~94% occupancy, so finer `(candidate, rollout)` task granularity is worth ~6% and is not worth the complexity.
+
+**Caching: no.** The per-state memo already exists. Speculative precompute during opponents' picks is the tempting version, and §11 already measured why it fails — the 8 most common states cover 17%/11%/9% of drafts at our first three picks, and ~195 of 203 round-1 states occur exactly once. Guessing 14 intervening picks does not improve on that.
+
+**Where the time now goes**, after `n_sims_per_rollout` fell to 150: rollout **33.6%**, season simulation **66.4%** (it was 42/58 before). Inside the season sim, roughly half is weekly-score sampling — dominated by gamma draws that are irreducible arithmetic — and half the lineup solve, already reduced. The only structural idea left is batching the RNG draws in `_sample_all`, worth ~15% of total, but it reorders the random stream and therefore costs a full re-validation. Not a free win; not currently worth it.
+
+**`n_candidates = 15` is load-bearing, and deep enough.** The eventual leader came from *greedy rank 7 and 8* at two of seven states, so the greedy proxy and the simulation genuinely disagree — this cutoff is not the formality §-3's prose implied. Widening it 15 → 25 across seven states changed the leader **0 times**, every gain +0.00pp. Validated rather than argued.
+
+**`survival.DEFAULT_N_SIMS` raised 300 → 3000.** This was the weakest link once `wait_cost_pp` became the primary tiebreaker (`tiebreak.describe_tie` orders a tie by it): at 300 sims the SD of `p_survive` was **2.8pp**, so "49% survive" and "55% survive" were one number in two costumes. Measured at pick 13 over 8 independent seeds — 300: 2.8pp at 0.28s; 1000: 1.4pp at 0.88s; 3000: **0.9pp at 1.44s**. Cost is sublinear because the opponent board is fixed cost.
+
+**Total per-pick cost, recommendation plus survival, against the 45s clock:**
+
+| our pick | picks until next turn | recommend | survival | total |
+|---|---|---|---|---|
+| 8 | 4 | 16.0s | 0.3s | 16.3s |
+| 13 | 14 | 15.6s | 1.1s | **16.7s** |
+| 53 | 14 | 14.6s | 1.1s | 15.7s |
+| 148 | 4 | 11.9s | 0.3s | 12.2s |
+
+Worst case **16.7s, leaving 28.3s of clock** to read the table and enter the pick.
 
 
 ## 16. Session log — 2026-08-11/22
