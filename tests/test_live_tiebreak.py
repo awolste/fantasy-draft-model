@@ -15,6 +15,7 @@ Both rules here exist because a full mock draft exposed concrete defects:
 from __future__ import annotations
 
 from ffdraft.live.tiebreak import (
+    describe_skill_alternative,
     describe_tie,
     LATE_FILL_POSITIONS,
     POSITION_CAPS,
@@ -287,3 +288,54 @@ def test_a_real_wait_cost_still_outranks_mere_scarcity():
     ]
     assert choose_from_tied(rows, counts={}, rounds_left=12)["name"] == "Costly"
     assert "Take **Costly** — passing costs 1.20pp" in describe_tie(rows)
+
+
+# ---------------------------------------------------------------------------
+# The skill-position alternative
+
+
+def _cand(name, position, champ):
+    return {"name": name, "position": position, "championship_probability": champ}
+
+
+def test_skill_alternative_is_silent_when_the_leader_is_already_skill():
+    """Nothing to trade off, so nothing to say."""
+    rows = [_cand("Back", "RB", 0.31), _cand("Passer", "QB", 0.29)]
+    assert describe_skill_alternative(rows) is None
+
+
+def test_skill_alternative_names_the_best_back_or_receiver_and_the_gap():
+    rows = [
+        _cand("Passer", "QB", 0.3430),
+        _cand("Back", "RB", 0.3280),
+        _cand("Tight", "TE", 0.3200),
+    ]
+    text = describe_skill_alternative(rows)
+    assert "**Best RB/WR: Back (RB) — 32.8%, 1.50pp behind.**" in text
+    # Calibrated to what was actually measured: the rounds 1-3 result
+    # replicated, the extension to rounds 4-8 came back null.
+    assert "rounds 1-3" in text and "no measured difference" in text
+
+
+def test_skill_alternative_picks_the_best_skill_row_not_the_first_one():
+    """Deliberately unsorted. Callers rank by championship probability, so
+    in practice the first skill row is the best one -- but relying on that
+    would mean a future re-sort of the table silently started naming the
+    wrong player as "best"."""
+    rows = [
+        _cand("Passer", "QB", 0.34),
+        _cand("Worse Back", "RB", 0.30),
+        _cand("Better Back", "WR", 0.33),
+    ]
+    text = describe_skill_alternative(rows)
+    assert "Better Back" in text
+    assert "Worse Back" not in text
+
+
+def test_skill_alternative_says_so_when_no_skill_player_was_simulated():
+    """The starvation case: the value function offered nothing but QB/TE,
+    so the simulation never scored a back or receiver at all."""
+    rows = [_cand("Passer", "QB", 0.34), _cand("Tight", "TE", 0.33)]
+    text = describe_skill_alternative(rows)
+    assert "No running back or receiver was simulated at all" in text
+    assert "pp behind" not in text

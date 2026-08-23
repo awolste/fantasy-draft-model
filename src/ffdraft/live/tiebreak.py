@@ -200,6 +200,60 @@ def describe_tie(tied: Sequence[dict]) -> str:
     return f"{head} Decide on **availability**:\n\n{lines}\n\n{tail}"
 
 
+SKILL_POSITIONS = frozenset({"RB", "WR"})
+
+
+def describe_skill_alternative(rows: Sequence[dict]) -> str | None:
+    """When the engine leads with a QB or TE, the best back or receiver
+    beside it, and what the simulation thinks that costs. `None` when
+    there is no trade to show.
+
+    **Free to compute.** Every row was already simulated at the same
+    budget with the same paired seeds, so this is a lookup, not a second
+    `recommend_pick` -- which would double a ~17s pick.
+
+    Why it earns the space: `draft.value` prices each pick as a static gap
+    to replacement and never asks how fast that gap decays, which tilts it
+    toward QB and TE (HANDOFF open item 3; measured 2026-08-22 at 13 of 24
+    picks in rounds 3-8 across four drafts, including a *second*
+    quarterback in round 7). The simulation cannot referee that, because
+    the rollout's own future picks use the same greedy function -- both
+    branches end QB-heavy. So the owner is shown the trade rather than
+    being asked to trust a number whose bias the number cannot see.
+
+    **The copy is deliberately calibrated to what was measured.** The
+    structure study, extended to rounds 4-8 on 2026-08-22, found forcing
+    RB/WR through round 5 or 8 worth `+0.22 +- 3.88pp` and
+    `+1.00 +- 4.46pp` against the unconstrained engine -- a null. Only the
+    rounds 1-3 result survives, and only in sign. Saying more than that
+    here would be the tool talking itself into a strategy the backtest
+    does not support.
+    """
+    if not rows or rows[0]["position"] in SKILL_POSITIONS:
+        return None
+    skill = [r for r in rows if r["position"] in SKILL_POSITIONS]
+    # `max`, not `skill[0]`. Callers pass rows already ranked by
+    # championship probability, so the two agree today -- but depending on
+    # that coupling means a future re-sort of the table would silently
+    # start naming the wrong player as "best".
+    if not skill:
+        return (
+            "**No running back or receiver was simulated at all** — every "
+            "candidate the value function offered was a QB, TE, K or D/ST. "
+            "That is the positional tilt at its worst; treat the leader with "
+            "suspicion and use the best skill player on your own board."
+        )
+    best = max(skill, key=lambda r: r["championship_probability"])
+    gap = (rows[0]["championship_probability"] - best["championship_probability"]) * 100
+    return (
+        f"**Best RB/WR: {best['name']} ({best['position']}) — "
+        f"{best['championship_probability'] * 100:.1f}%, {gap:.2f}pp behind.** "
+        f"The value function tilts toward QB/TE. Backtested, forcing skill "
+        f"positions in **rounds 1-3** was better in 9 of 9 comparisons; past "
+        f"round 3 it made **no measured difference**."
+    )
+
+
 def choose_from_tied(
     rows: Sequence[dict],
     counts: Mapping[str, int],

@@ -57,6 +57,7 @@ from ffdraft.live.roster_view import league_standing, team_view
 from ffdraft.live.state import DraftBoard
 from ffdraft.live.tiebreak import (
     best_uncapped_available,
+    describe_skill_alternative,
     describe_tie,
     filter_capped,
 )
@@ -376,6 +377,10 @@ def _render_recommendation(board, ctx) -> None:
     tied = [r for r in rows if r["indistinguishable_from_leader"]]
     if len(tied) > 1:
         st.info(describe_tie(tied))
+
+    alternative = describe_skill_alternative(rows)
+    if alternative:
+        st.info(alternative)
 
     st.dataframe(
         [

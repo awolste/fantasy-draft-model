@@ -47,7 +47,10 @@ USABLE_HOLDOUTS = [2020, 2021, 2022, 2023, 2024]
 
 # The three structures the design doc names, plus an unconstrained engine
 # reference and an ADP-following external reference.
-STRUCTURES: dict[str, tuple[str, ...] | None] = {
+# A round may name one position, or a set of allowed positions.
+SKILL = frozenset({"RB", "WR"})
+
+STRUCTURES: dict[str, tuple[str | frozenset[str], ...] | None] = {
     # The three the design doc named -- measured 2026-08-08, statistically
     # indistinguishable from each other (HANDOFF 7c).
     "0RB": ("WR", "WR", "WR"),
@@ -62,20 +65,35 @@ STRUCTURES: dict[str, tuple[str, ...] | None] = {
     "QB_early": ("QB", "RB", "WR"),
     "TE_early": ("TE", "RB", "WR"),
     "QB_and_TE": ("QB", "TE", "WR"),
+    # Added 2026-08-22 to settle rounds 4-8. The 3-round structures above
+    # answered "is an early QB/TE bad" for rounds 1-3 only; the engine's
+    # tilt does not stop there (measured: a QB or TE at 13 of 24 picks in
+    # rounds 3-8 across four 2026 drafts, and a *second* QB in round 7 in
+    # two of them). A frozenset entry constrains a round to a set of
+    # positions rather than one, so these say "no QB or TE yet" without
+    # dictating RB-vs-WR order -- which 7c already found does not matter.
+    "skill_5": (SKILL,) * 5,
+    "skill_8": (SKILL,) * 8,
     "engine_free": None,
 }
 CONTENDERS = (*STRUCTURES, "adp")
 
 
-def structured_policy(pattern: tuple[str, ...], n_teams: int):
+def structured_policy(pattern: tuple[str | frozenset[str], ...], n_teams: int):
     """Force the first `len(pattern)` picks to the named positions, taking
     the best available at that position by the engine's own value
     function; unconstrained afterwards.
 
-    Falls through to an unconstrained pick if no player of the required
-    position is available -- which cannot happen this early in a real
-    draft, but a silent IndexError here would be exactly the kind of
-    plausible-looking corruption this project keeps getting bitten by.
+    Each entry is either one position (`"RB"`) or a set of allowed ones
+    (`frozenset({"RB", "WR"})`). The set form exists so a structure can say
+    "not a QB or TE yet" without also dictating the RB-vs-WR ordering that
+    7c already measured as irrelevant -- constraining more than the
+    hypothesis needs would confound the two.
+
+    Raises if the structure demands a position that is not available --
+    which cannot happen this early in a real draft, but a silent
+    IndexError here would be exactly the kind of plausible-looking
+    corruption this project keeps getting bitten by.
     """
 
     def _policy(available_ids, pool, roster_pairs, replacement_means, replacement_by_position):
@@ -83,10 +101,12 @@ def structured_policy(pattern: tuple[str, ...], n_teams: int):
         candidates = available_ids
         if rnd <= len(pattern):
             required = pattern[rnd - 1]
-            at_position = [pid for pid in available_ids if pool[pid].position == required]
+            allowed = {required} if isinstance(required, str) else set(required)
+            at_position = [pid for pid in available_ids if pool[pid].position in allowed]
             if not at_position:
                 raise ValueError(
-                    f"structure demanded a {required} in round {rnd} but none was available"
+                    f"structure demanded one of {sorted(allowed)} in round {rnd} "
+                    f"but none was available"
                 )
             candidates = at_position
         return _choose_our_pick(

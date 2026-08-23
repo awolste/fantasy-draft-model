@@ -121,7 +121,7 @@ Since commit `2b845cc`, lineups are chosen on **projected means** and scored on 
 
 1. ~~Task 6: the engine loses the backtest by 13.5pp.~~ **RESOLVED — the verdict was wrong.** ~6pp was a hindsight-scoring artifact (now fixed) and 2024 was the worst of five usable holdouts. Multi-season, ex-ante, through the production path: **engine − ADP = +2.86pp, between-season SE 4.15pp, beating ADP in 3 of 5 seasons.** §7b tests 6-9, §10. **Do not quote that figure as a current result — see §7e**: it averages two opposite regimes, and the engine loses both of the most recent seasons.
 
-2. ~~Task 7: the structure study has not been run.~~ **RESOLVED, in two parts.** Among RB/WR orderings, structure does not matter (all pairwise gaps ≤1.75pp against SEs of 1.4-2.9). But **taking a QB or elite TE in rounds 1-3 is measurably worse** — 9 of 9 comparisons favour a skill-only start, strongest at 3.6 sigma. §7c and its 2026-08-09 extension.
+2. ~~Task 7: the structure study has not been run.~~ **RESOLVED, in three parts.** Among RB/WR orderings, structure does not matter (all pairwise gaps ≤1.75pp against SEs of 1.4-2.9). Taking a QB or elite TE **in rounds 1-3** is worse — 9 of 9 comparisons favour a skill-only start. **Beyond round 3 the tilt is a null**: constraining the engine to RB/WR through round 5 or 8 is worth +0.22pp and +1.00pp against ~4pp SEs (§7c extension, 2026-08-22). §7c and its two extensions.
 
 **Known defects and unresolved questions:**
 
@@ -592,6 +592,45 @@ Forcing RB/WR in the first three rounds means **not taking the early QB**. In 20
 1. **Do not pre-commit to a draft structure.** No structural rule was worth more than ~1.75pp, and none of that survives its error bar. Take the best available player.
 2. **The decision that carries real weight at picks 8 and 13 is whether to spend one on a quarterback**, and its payoff swings ±15pp depending on something unknowable in advance (how good streamable QBs turn out to be that year).
 3. ~~Size the QB bet down.~~ **SUPERSEDED — measured and contradicted, see §10.** Sweeping a QB-replacement penalty across 2020-2024 shows the mean championship rate *falls* as the tilt shrinks (11.47% at delta=0 down to 9.27% at delta=5). It buys lower season-to-season variance, which is worthless for a draft you run once. Leave the value function alone and take the best available player.
+
+### 7c extension — the tilt beyond round 3 is a null, 2026-08-22
+
+**Asked because the owner saw the app pushing QBs and TEs in rounds 6-8.** Measured first in the live 2026 board: across four independent drafts the engine took a QB or TE at **13 of 24 picks in rounds 3-8**, at round 3 the pruned candidate list ran **7-9 of 15** QB/TE, and in two drafts it took a *second* quarterback in **round 7**. So the tilt is real and it does not stop at round 3.
+
+**The mechanism.** `value_available` prices each pick as a static gap to replacement. At pick 28 holding Chase + Bowers, with the QB slot still at replacement 18.26:
+
+| | proj | greedy value |
+|---|---|---|
+| Josh Allen (QB) | 27.45 | **9.19** |
+| Lamar Jackson (QB) | 25.08 | 6.81 |
+| Saquon Barkley (RB) | 13.58 | 4.03 |
+| Garrett Wilson (WR) | 13.38 | 3.57 |
+
+Locally correct and strategically blind: it never asks **how fast each position's gap decays.** QB replacement barely moves all draft (~32 startable quarterbacks for 10 slots); RB/WR replacement collapses. That is the "what does waiting cost" question `wait_cost_pp` answers for ties, and the value function does not use it.
+
+**And the simulation cannot referee it**, because the rollout's own future picks call the same greedy function. Force a back now and the rollout takes the quarterback *next* round anyway — both branches finish QB-heavy, so the comparison is "QB now vs QB one round later", not "QB roster vs skill roster". Only an externally *forced* structure can measure the difference, which is what this study does through `pick_policy`.
+
+**The measurement. `structured_policy` now accepts a set of allowed positions per round**, so a structure can say "not a QB or TE yet" without also dictating the RB-vs-WR order 7c already found irrelevant. `skill_5` and `skill_8` constrain rounds 1-5 and 1-8 to RB/WR, then run free. n=1000 seeds per season, 2020-2024:
+
+| | pooled | vs `engine_free` |
+|---|---|---|
+| `hero_RB` (RB,WR,WR then free) | 19.84% | +4.70 ± 4.61 |
+| `2RB_1WR` | 19.76% | +4.62 ± 4.60 |
+| `0RB` | 18.98% | +3.84 ± 4.66 |
+| `QB_early` | 16.92% | +1.78 ± 3.04 |
+| **`skill_8`** | **16.14%** | **+1.00 ± 4.46** |
+| `TE_early` | 16.84% | +1.70 ± 2.50 |
+| **`skill_5`** | **15.36%** | **+0.22 ± 3.88** |
+| `engine_free` | 15.14% | — |
+| `QB_and_TE` | 13.38% | −1.76 ± 2.25 |
+| `adp` | 14.08% | |
+
+**Constraining the engine to RB/WR through round 5 or round 8 is worth nothing measurable: +0.22pp and +1.00pp against ~4pp standard errors.** Per season, `skill_8 − engine_free` runs −10.2, −6.1, +1.4, +4.4, +15.5 — the season-to-season swing is an order of magnitude larger than the effect.
+
+**So the tilt beyond round 3 is not demonstrated to cost anything**, and an earlier inference in this session that it did — "take the best RB/WR through round 8" — was not supported by the data and is retracted. What survives is the original rounds 1-3 result, and only in **sign**: all 9 skill-vs-early-QB/TE comparisons favour skill (+2.06 to +6.46pp), replicating 7c, but at this n none clears 2σ.
+
+> **A lead, flagged as the kind that has burned this project before.** `skill_8` beats `engine_free` in exactly 2023 (+4.4) and 2024 (+15.5) — the two seasons §7e says the engine loses — and loses in 2020-2022. That is a two-point pattern, and §16's corrections table already contains one case where a two-season story was falsified by the third. Worth testing against open item 1; worth believing only after that.
+
 
 ## 7d. Opponent-model temperature — FIXED 2026-08-09 (item 3b)
 
