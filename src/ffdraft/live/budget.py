@@ -120,5 +120,40 @@ FULL_BUDGET = Budget(
 # leader was already identical at every budget measured, so the headroom is
 # available to spend on precision if wanted, but spending it is a decision
 # to take deliberately and re-measure, not a side effect of an optimisation.
-LIVE_BUDGET = Budget(n_candidates=12, n_rollouts=16, n_sims_per_rollout=300, seed=20260804,
-                     n_workers=0)
+# WIDENED 2026-08-22, deliberately and re-measured, after the speedups in
+# HANDOFF section 15 left ~10x of headroom. The reason is not "we can", it
+# is that the old budget produced **spurious tie flags**: at 16 rollouts
+# the leader's SE was 1.66pp, so `indistinguishable_from_leader` fired on
+# candidates the model can separate perfectly well given more rollouts.
+# Measured at our pick 8 -- the worst case, most rounds left to simulate:
+#
+#   budget            time   lead SE   tied   leader
+#   12x16x300          1.3s     1.66   4/12   Ja'Marr Chase   <- old
+#   15x48x300          3.9s     1.06   1/15   Ja'Marr Chase
+#   15x120x300        10.0s     0.61   1/15   Ja'Marr Chase
+#   15x300x150        16.1s     0.39   1/15   Ja'Marr Chase   <- LIVE
+#   15x500x150        26.6s     0.29   1/15   Ja'Marr Chase
+#   15x700x150        37.2s     0.25   1/15   Ja'Marr Chase
+#
+# **The leader is identical at every budget across a 23x range of compute**,
+# so this buys precision and tie-flag calibration, not a different pick.
+#
+# Why 150 season sims and not 300: at roughly equal wall time, buying
+# rollouts beats buying season sims, exactly as the Neyman argument in
+# `draft.recommender`'s docstring says -- and the speedups moved that
+# optimum further toward rollouts (M* is now ~140, not ~500). Measured:
+#
+#   15x400x150        21.4s     SE 0.33
+#   15x300x300        24.7s     SE 0.36     more time, worse SE
+#   15x150x500        18.2s     SE 0.46     more time, worse SE
+#   15x500x200        31.4s     SE 0.29     5s more than 500x150, same SE
+#
+# Why 16s and not the 37s that also fits under the 45s clock: the clock has
+# to cover reading the recommendation and entering the pick, not just
+# computing it. 16.1s leaves ~29s of human time out of 45 (64%), close to
+# the ratio the original 90s/35.6s choice struck (60%). The precision given
+# up is 0.14pp of SE against the model's own 4.15pp between-season error
+# (HANDOFF section 10) -- immaterial. Cost falls with rounds left, so every
+# later pick is cheaper: 16.1s at pick 8, 11.9s at pick 148.
+LIVE_BUDGET = Budget(n_candidates=15, n_rollouts=300, n_sims_per_rollout=150,
+                     seed=20260804, n_workers=0)

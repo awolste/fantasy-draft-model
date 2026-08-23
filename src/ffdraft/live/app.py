@@ -7,16 +7,19 @@ drafts found 203/248/269 distinct states at our first three picks, so the
 8 most common covered only 17.0%/11.3%/9.0% of drafts. Nearly every state
 occurs exactly once -- the space is irreducibly large at the granularity
 that changes a recommendation. ~78 minutes of precompute bought roughly one
-pick in eight; a live recommendation covers all of them, and now costs
-1-2s. See HANDOFF section 11.
+pick in eight; a live recommendation covers all of them. See HANDOFF
+section 11.
 
 **This page runs the recommender in parallel**, which it could not do
 until `draft.recommender._neutral_main` removed the requirement for an
 `if __name__ == "__main__"` guard that a Streamlit script cannot have. The
 worker pool is started on the first recommendation and kept for the rest of
-the session; measured here at pick 8, 2.1s on the first pick and 1.4s
-thereafter, against 12.4s before this pass. Any failure to start or use the
-pool falls back to the serial loop with a warning and identical numbers.
+the session. That speedup was then spent rather than pocketed: the budget
+is `15x300x150`, ~17s at our worst pick against a 45s clock, chosen because
+the old one produced tie flags on candidates the model can separate
+perfectly well (HANDOFF section 15, "Spending the headroom"). Any failure
+to start or use the pool falls back to the serial loop with a warning and
+identical numbers.
 
 Three things this page must always show, because each is a way the tool
 could otherwise mislead:
@@ -47,7 +50,7 @@ import streamlit as st
 # `__main__` rather than importing it as `ffdraft.live.app`, so relative
 # imports raise "attempted relative import with no known parent package".
 from ffdraft.league import DRAFT_SLOT, N_TEAMS
-from ffdraft.live.budget import FULL_BUDGET, LIVE_BUDGET
+from ffdraft.live.budget import LIVE_BUDGET
 from ffdraft.live.cache import candidates_to_rows, recommend, state_key
 from ffdraft.live.context import live_context
 from ffdraft.live.roster_view import league_standing, team_view
@@ -179,8 +182,8 @@ def _memoized_recommendation(key, board, ctx):
     Streamlit re-executes this whole script on every interaction. Without a
     memo, clicking Undo or touching the selectbox after a recommendation
     appeared would re-run the simulation on the clock. That mattered more
-    when a pick cost 35.7s than it does at today's 1-2s, but it is still the
-    difference between an instant redraw and a visible stall. Keyed by
+    at today's ~17s than it was at 35.7s, but it is still the difference
+    between an instant redraw and a visible stall. Keyed by
     `state_key`, so a genuinely new board still costs compute and a rerun at
     an unchanged board is free.
     """
@@ -334,10 +337,16 @@ def _render_recommendation(board, ctx) -> None:
         board.next_overall_pick, board.our_roster_counts, board.drafted_ids, ctx.pool
     )
     (rows, elapsed), from_memo = _memoized_recommendation(key, board, ctx)
+    leader_se = rows[0]["standard_error"]
     st.caption(
         f"**live** · budget {LIVE_BUDGET.label} · {elapsed:.1f}s"
         + (" · reused from this session (board unchanged)" if from_memo else "")
-        + f" · full budget for reference is {FULL_BUDGET.label}"
+        # No longer compares against FULL_BUDGET. That caption read "full
+        # budget for reference is 15x65x500", implying more simulation was
+        # available than the clock allowed -- true when the live budget was
+        # a reduced one, and misleading now that it does more work than
+        # FULL_BUDGET does. See tests/test_live_budget.py.
+        + f" · leader SE {leader_se * 100:.2f}pp"
     )
 
     # Stamp the leader's simulated probability for the team panel BEFORE

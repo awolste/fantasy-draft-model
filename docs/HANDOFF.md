@@ -37,7 +37,7 @@ Full K and DST scoring rules are in the spec. Two bands are **neutral, not missi
 | 4 | Live draft assistant | **Complete** (live-only; + survival columns, position caps, scarcity tie-break) |
 | — | Draft-day aids | **Complete** — precomputed 6-round pick tree + interactive explorer (§14); "My team" lineup panel (§11) |
 
-**All four stages are merged and pushed to `origin/main`. 458 tests pass in ~2:10** on the native arm64 venv. **A live recommendation costs ~1.4s** against a 90-second pick clock, down from 12.4s, with output identical at every step — two optimisation passes, §15.
+**All four stages are merged and pushed to `origin/main`. 458 tests pass in ~2:10** on the native arm64 venv. **A live recommendation costs ~17s at our worst pick** against the owner's 45-second clock. Two optimisation passes took the *old* budget from 34.2s to 1.4s with byte-identical output; the headroom was then deliberately spent on a ~12x larger budget, because the old one was producing spurious tie flags. All §15.
 
 > **Read §7e before trusting any performance claim on this page.** The engine wins 2020-2022 and *loses* 2023 and 2024, and the pooled edge over ADP averages those two opposite regimes together. The two seasons most like 2026 are the two it loses. This is open item 1 and it is unresolved.
 
@@ -146,7 +146,7 @@ In real drafts those top-4 numbers are close to zero — nobody passes on the co
 
 3. **QB=3 and K=2 are cap-bound in every rollout.** The value function still ranks a third QB and second kicker above better alternatives; a policy guard (`MAX_EXTRA_BENCH_NO_FLEX`) is the only thing stopping it. That is masking, not fixing, and costs ~2 roster spots versus opponents' 1.7 QB / 1.2 K. `value.py` has been through three fix rounds; a fourth patch is probably the wrong move — consider whether greedy marginal value is the right policy at all.
 4. **Between-rollout variance appears state-dependent and is unresolved.** Measured 3.50pp at pick 8 (n=50) but 5.97pp in an independent 10-seed check at a different state. The staleness guard catches drift over time but will not tell you the allocation is too tight at some other draft state.
-5. ~~A recommendation costs ~5.6 minutes, too slow for a live draft.~~ **RESOLVED in Stage 4 (§11), and no longer a constraint at all.** The live tool uses a measured reduced budget (12×16×300), which cost 35.7s at our worst pick when it was chosen and costs **~1.4s** after the two optimisation passes in §15. Precompute was built and dropped after measuring a 9–17% hit rate; at 1.4s there is nothing left for it to buy.
+5. ~~A recommendation costs ~5.6 minutes, too slow for a live draft.~~ **RESOLVED in Stage 4 (§11).** The live budget is now **15×300×150**, costing ~17s at our worst pick against a 45s clock — see §15, "Spending the headroom". Precompute was built and dropped after measuring a 9–17% hit rate, and nothing since has made it worth revisiting.
 6. **Test suite takes ~2:10** for 458 tests (~7:40 before the 2026-08-11 speedup, ~12 min under Rosetta; §15). Still dominated by the pick-8/pick-13 real-data tests running full production budgets; pinning a smaller explicit budget there is still worth doing.
 7. **`sources/nflverse.py` imports `models/kicking.py`** — a Stage 1 → Stage 2 layering inversion. Cheap to fix by moving `kicking.py` beside `scoring.py`.
 8. ~~Python runs under Rosetta x86-64 emulation.~~ **RESOLVED 2026-08-08.** Native arm64 CPython 3.11.15 installed via `uv python install cpython-3.11-macos-aarch64-none`; `.venv` is now native and the x86_64 one is deleted. Suite went 11:30 → ~7:40, and the intermittent native crashes and silent numeric corruption are gone (§10b, §10c). Never set `POLARS_SKIP_CPU_CHECK=1`.
@@ -945,7 +945,7 @@ Two things make this better than the raw number. **Pick entry does not compete w
 
 Why not the 15×20×400 budget that also fits under 60s: the 90s clock must also cover entry, reading, and deciding. 35.6s leaves ~54s of human time against ~30s. The precision surrendered is 0.25pp of SE against the model's own 4.15pp between-season SE (§10) — a bad trade.
 
-> **The timings in this table are from when the budget was chosen (2026-08-04) and are kept as the record of that decision.** The same budget now costs ~1.4s (§15). The *choice* was deliberately left alone rather than quietly widened: the leader was identical at every budget measured, so spending the headroom is a decision to take and re-measure, not a side effect of an optimisation.
+> **This table is the record of the 2026-08-04 decision and is kept as history. The budget it chose is no longer in force.** That same 12×16×300 fell to ~1.4s after the speedups, and on 2026-08-22 the budget was widened to **15×300×150** — see §15, "Spending the headroom", for why (spurious tie flags) and for the ladder it was chosen from.
 
 ### The rerun hazard, and the memo
 
@@ -962,7 +962,7 @@ Streamlit re-executes the entire script on every interaction. The first version 
 2. `.venv/bin/streamlit run src/ffdraft/live/app.py`
 3. Load the page **before** the draft starts — fitting the context takes a few seconds and is cached per session.
 4. Enter every pick as it happens, including opponents'. Undo fixes a mis-entry.
-5. At our pick the recommendation computes automatically (~1.4s, §15). Read the tie callout before the ranking: candidates flagged indistinguishable from the leader are equivalent, and the ordering among them is noise.
+5. At our pick the recommendation computes automatically (~17s at our first pick, less later — §15). Read the tie callout before the ranking: candidates flagged indistinguishable from the leader are equivalent, and the ordering among them is noise.
 6. The **My team** column on the right is live at every pick, not just ours. Read its empty-slot warning before either of its point figures — early on, most of that total is replacement-level filler.
 
 ### The "My team" panel — 2026-08-22
@@ -1140,7 +1140,7 @@ Roster shape is enforced by *feasibility*, not a fixed pattern: a position is of
 
 **How it shipped matters more than the typo.** The page was "verified" by pasting an equivalent script into a live browser and watching it work — the preview pane strips inline scripts, so the real artifact was never executed even once. Verifying a retyped copy of a deliverable is not verifying the deliverable. `build_pick_tree_page.py` now runs `node --check` on its own output and refuses to write a page that does not parse (proven by reintroducing the bug: exit 1, no file written).
 
-## 15. Performance — a live pick costs 1.4s, bit-identical throughout — 2026-08-11, second pass 2026-08-22
+## 15. Performance — the recommender got ~25x faster, and the headroom was then spent — 2026-08-11, 2026-08-22
 
 Two passes, both held to the same bar: **the output must not move at all.** Not "within tolerance" — byte-identical, checked by diffing full recommendations rather than by argument. Read them in order; the second overturns one of the first's conclusions.
 
@@ -1163,6 +1163,8 @@ Two dead ends recorded so they are not retried: `forkserver` does *not* avoid im
 **Budgets were deliberately NOT widened.** There is ~10x headroom now, but the leader was already identical at every budget measured, so spending it is a decision to take and re-measure, not a side effect of an optimisation.
 
 ### Second pass — 12.4s → 1.4s in the app, 2026-08-22
+
+*(Both passes below hold the budget fixed at the old 12x16x300. What was done with the resulting headroom is the third part, "Spending the headroom".)*
 
 | stage | one pick at overall 8 |
 |---|---|
@@ -1188,9 +1190,46 @@ The 1.4s is measured **in the real Streamlit app**, driven through the UI to pic
 **Not done, recorded so it is not re-derived.** (a) 12 candidates over 8 workers is two uneven waves; per-`(candidate, rollout)` tasks would balance it, worth perhaps another 0.3s. (b) Weekly-score sampling is now about half the remaining serial cost and ~1.9s of it is irreducible gamma draws; batching by tier (16 distinct `gamma_shape` values) could roughly halve that, but it reorders the RNG stream — a re-validation, not a free win. (c) The budget allocation is already near-optimal: re-running the Neyman calculation with current per-unit costs gives `M* ≈ 178` against the configured 300, worth under 7%. Do not chase it.
 
 
+### Spending the headroom — the budget is now 15x300x150, 2026-08-22
+
+**The old budget was producing tie flags it should not have.** At pick 8 the app reported four candidates as `indistinguishable_from_leader`, including Josh Allen at a 4.56pp deficit — a quarterback the survival model said was **100% likely to still be there next turn**. The owner's objection was the right one: if you can have him next round *and* a great player now, taking him now cannot be an equivalent choice.
+
+**The model already agreed.** The rollout keeps drafting greedily after the forced pick, so Chase's number already banks whatever quarterback we take at 13+, and Allen's already banks whatever receiver we get instead of Chase. Run at the full budget on the same board, they separate decisively:
+
+| | 12x16x300 (old live) | 15x65x500 (full) |
+|---|---|---|
+| Ja'Marr Chase | 28.00% | **33.38%** |
+| Josh Allen | 23.44% | 23.68% |
+| gap | 4.56pp — *flagged tied* | **9.70pp — not tied** |
+| flagged tied | 4 | 0 |
+
+So the checkmark meant "I cannot tell at this budget", not "these are equal" — a **precision artifact**, and one that was actively misleading on the clock. Spurious ties across five boards, 16 rollouts → 48: 2→1, 7→2, 6→3, 4→3, 8→1 (mean 5.4 → 2.0).
+
+**The ladder it was chosen from**, at pick 8 — our worst case, most rounds left to simulate:
+
+| budget | time | leader SE | tied | leader |
+|---|---|---|---|---|
+| 12x16x300 | 1.3s | 1.66 | 4/12 | Ja'Marr Chase |
+| 15x48x300 | 3.9s | 1.06 | 1/15 | Ja'Marr Chase |
+| 15x120x300 | 10.0s | 0.61 | 1/15 | Ja'Marr Chase |
+| **15x300x150** | **16.1s** | **0.39** | **1/15** | Ja'Marr Chase |
+| 15x500x150 | 26.6s | 0.29 | 1/15 | Ja'Marr Chase |
+| 15x700x150 | 37.2s | 0.25 | 1/15 | Ja'Marr Chase |
+
+**The leader is identical at every budget across a 23x range of compute.** This buys precision and tie-flag calibration, not a different pick — which is the same thing the 2026-08-04 measurement found, and worth re-stating because it bounds what any further spending could achieve.
+
+**Allocation, re-measured rather than assumed.** `recommender`'s Neyman argument says buy rollouts before season sims, and the speedups moved that optimum further that way (`M*` is now ~140, not ~500). At roughly equal wall time: 15x400x150 → SE 0.33 in 21.4s; 15x300x300 → SE 0.36 in 24.7s; 15x150x500 → SE 0.46 in 18.2s. Fewer sims, more rollouts, confirmed. 15x500x200 matched 15x500x150's SE for 5s more, so 150 is at the knee.
+
+**Why 16s and not the 37s that also fits.** The clock has to cover reading the recommendation and entering the pick, not only computing it. 16.1s leaves ~29s of human time out of 45 (64%), close to the ratio the original 90s/35.6s decision struck (60%). The precision surrendered is 0.14pp of SE against the model's own **4.15pp** between-season error (§10) — immaterial. Cost falls with rounds left: 16.1s at pick 8, 15.5s at 28, 11.9s at 148. Verified in the running app at 17.2s with the tie callout gone and Allen 7.52pp back.
+
+> **The clock is 45s** (owner, 2026-08-22). §11's original reasoning assumed 90s; if the real clock differs again, re-run the ladder rather than interpolating — cost is not linear in any one knob.
+
+**Two consequences to know about.** `FULL_BUDGET` is now *smaller* than `LIVE_BUDGET` (487,500 vs 675,000 units of work), which inverted a test that asserted the opposite; it is pinned to `recommend_pick`'s defaults, which were derived from per-unit costs measured before the speedups and are deliberately **not** re-derived, because changing them would silently change the backtest too. And `scripts/build_pick_tree.py` runs at `LIVE_BUDGET` on purpose, so the tree build goes from ~5.7 minutes to roughly **25 minutes**. That is fine for a pre-draft artifact, but do not start it expecting the old number.
+
+
 ## 16. Session log — 2026-08-11/22
 
-**Shipped:** the pick tree and explorer (§14); two bit-identical speedup passes taking a live pick from 34.2s to 1.4s, the second of which put workers in the Streamlit app after the first pass had concluded that was impossible (§15); the fitted per-round opponent temperature (§7d); the player selector re-ordered by **ADP** with board rank beside it (it is used to record what *other* managers did, and they draft off ADP — the two disagree by 20.7 places on average, and Cincinnati's D/ST is ADP 174 vs board #404).
+**Shipped:** the pick tree and explorer (§14); a "My team" starting-lineup panel and a tie callout that says what to decide on instead (§11); two bit-identical speedup passes taking a live pick from 34.2s to 1.4s — the second put workers in the Streamlit app after the first had concluded that was impossible — and then **spent** that headroom on a 12x budget, because the old one was flagging ties the model could resolve (§15); the fitted per-round opponent temperature (§7d); the player selector re-ordered by **ADP** with board rank beside it (it is used to record what *other* managers did, and they draft off ADP — the two disagree by 20.7 places on average, and Cincinnati's D/ST is ADP 174 vs board #404).
 
 **Investigated, not solved:** §7e. The engine's collapse in 2023-24 is real and robust across both opponent models. Ruled out: the temperature schedule, ADP coverage, and the QB tilt (re-pricing QB replacement by +2.15 cuts QBs drafted from 3.00 to 0.99 and makes those seasons *worse*).
 

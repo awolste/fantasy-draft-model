@@ -92,7 +92,7 @@ def main() -> None:
     base_key = state_key(args.pick, counts, set(base_drafted), ctx.pool)
 
     print(f"cutoff TOP_N_FOR_KEY={TOP_N_FOR_KEY} | pick {args.pick} | "
-          f"full budget {FULL_BUDGET.label} (~200s per call)\n")
+          f"full budget {FULL_BUDGET.label} (~8s per call since HANDOFF section 15)\n")
 
     t0 = time.perf_counter()
     base_rec = recommend(base, ctx, FULL_BUDGET)
