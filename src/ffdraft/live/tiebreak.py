@@ -30,6 +30,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 
 from ..league import STARTERS
+from .survival import LIKELY_SURVIVOR
 
 # Only one QB and one K can start. A second QB is worth having as cover; a
 # third never plays. A second kicker never plays either.
@@ -136,20 +137,29 @@ def describe_tie(tied: Sequence[dict]) -> str:
     (the gaps are smaller than the uncertainty *in* the gaps) and then
     redirects to the dimension that is still informative.
 
-    **Ordered by `wait_cost_pp`, not by championship probability.** Once
-    the model cannot separate the candidates on title equity, the ranking
-    it is displayed in carries no information, and leading with it invites
-    reading a tie as an ordering. Availability does carry information, and
-    it is the first key `choose_from_tied` sorts on, so the callout and the
-    automatic choice agree by construction.
+    **`wait_cost_pp == 0` does not mean he will still be there.** It means
+    passing costs nothing *in expectation*, because a comparably good
+    candidate is likely to last -- so it is zero for a player who is 7% to
+    survive whenever someone at least as good is 69% to survive. An earlier
+    version rendered that as "free to pass" and then summarised the whole
+    list as "they are all likely to last until your next turn", which was
+    plainly false and was caught by the owner reading it. Survival is now
+    stated first, in every line, and the summary never infers availability
+    from a zero cost.
 
-    Three cases, because the honest advice genuinely differs:
+    Ordered by `wait_cost_pp` then by ascending `p_survive`, matching
+    `choose_from_tied`; when the costs are all zero, scarcity is the whole
+    decision and the ordering has to reflect that.
 
-    * no next turn (our last pick) -- nothing to wait for, so fall back to
-      judgement;
-    * somebody is unlikely to last -- name him;
-    * everybody is likely to last -- say so, because "no urgency" is a
-      real answer and inventing a reason to hurry would be worse.
+    Four cases, because the honest advice genuinely differs:
+
+    * no next turn (our last pick) -- nothing to wait for, so judgement;
+    * somebody costs real equity to pass -- name him;
+    * costs are all zero but somebody is scarce -- the candidates are
+      interchangeable on title equity, so take the one you are least
+      likely to still have, and you probably keep the others too;
+    * costs are all zero and everybody is likely to last -- say there is no
+      urgency, because that is a real answer.
     """
     n = len(tied)
     head = (
@@ -165,27 +175,22 @@ def describe_tie(tied: Sequence[dict]) -> str:
             f"own judgement — need, injury news, bye weeks."
         )
 
-    # Secondary key: among candidates that cost nothing to pass, the one
-    # least likely to survive still deserves to be read first. Wait cost
-    # can be zero for a coin-flip survivor -- it is clamped once a likely
-    # survivor scores as well as he does -- and sorting on cost alone would
-    # bury a 49% player behind a 99% one.
-    ranked = sorted(
-        rated,
-        key=lambda r: (-(r["wait_cost_pp"] or 0.0),
-                       1.0 if r.get("p_survive") is None else r["p_survive"]),
-    )
+    def survival(r):
+        return 1.0 if r.get("p_survive") is None else r["p_survive"]
+
+    ranked = sorted(rated, key=lambda r: (-(r["wait_cost_pp"] or 0.0), survival(r)))
+
     lines = "\n".join(
         f"- **{r['name']}** ({r['position']}) — "
         + (
-            f"{r['wait_cost_pp']:.2f}pp to pass"
-            if r["wait_cost_pp"]
-            else "free to pass"
+            f"**{survival(r) * 100:.0f}%** likely to still be there"
+            if r.get("p_survive") is not None
+            else "survival unknown"
         )
         + (
-            f" · {r['p_survive'] * 100:.0f}% still there next turn"
-            if r.get("p_survive") is not None
-            else ""
+            f" · passing costs {r['wait_cost_pp']:.2f}pp"
+            if r["wait_cost_pp"]
+            else " · passing costs nothing extra"
         )
         for r in ranked
     )
@@ -193,18 +198,30 @@ def describe_tie(tied: Sequence[dict]) -> str:
     top = ranked[0]
     if top["wait_cost_pp"]:
         tail = (
-            f"\n\n**{top['name']}** costs the most to pass on — he is the one "
-            f"least likely to be there at your next pick."
+            f"\n\n**{top['name']}** costs the most to pass on "
+            f"({top['wait_cost_pp']:.2f}pp) — he is the one least likely to be "
+            f"there at your next pick."
+        )
+    elif survival(top) < LIKELY_SURVIVOR:
+        # Every cost is zero because whoever you pass on has a comparable
+        # fallback still on the board -- NOT because everyone will last.
+        # With title equity exhausted, scarcity is the entire decision:
+        # take the scarce one and you probably keep the others too.
+        tail = (
+            f"\n\nNobody costs extra to pass, because whoever you skip has a "
+            f"comparable fallback still on the board — that is **not** the same "
+            f"as everyone lasting. **{top['name']}** is the least likely to "
+            f"survive ({survival(top) * 100:.0f}%), so taking him is how you most "
+            f"likely end up with two of these rather than one."
         )
     else:
         tail = (
-            "\n\nNone of them costs anything to pass on: they are all likely to "
-            "last until your next turn. No urgency here — decide on roster need."
+            f"\n\nAll of them are likely to last until your next turn (lowest is "
+            f"{survival(top) * 100:.0f}%). No urgency here — decide on roster need."
         )
 
     return (
-        f"{head} Decide on **availability** instead — expected title equity "
-        f"lost by passing now:\n\n{lines}{tail}"
+        f"{head} Decide on **availability** instead:\n\n{lines}{tail}"
     )
 
 
@@ -219,6 +236,9 @@ def choose_from_tied(
 
     1. **Highest `wait_cost_pp`** -- of two players worth the same, take the
        one who will not be there next time.
+    1b. **Lowest `p_survive`**, once the costs tie. A zero cost means "a
+       comparable player is likely to last", not "this player will last",
+       so a tie of zeros is decided by who is actually scarce.
     2. **Actively demote K/D/ST** while the draft is young. Merely not
        counting them as a "need" is not enough: with every other key tied,
        the choice fell through to the deterministic id tie-break and a
@@ -233,6 +253,14 @@ def choose_from_tied(
         tied,
         key=lambda r: (
             -(r.get("wait_cost_pp") or 0.0),
+            # Scarcity, and it has to come second. `wait_cost_pp` is zero
+            # whenever a comparable candidate is likely to last, which makes
+            # it zero for a 7%-to-survive player sitting beside a 69% one --
+            # so on a tie of zeros this used to fall through to championship
+            # probability and take the *available* player over the scarce
+            # one, losing the scarce one for nothing. Ascending, so least
+            # likely to survive wins.
+            1.0 if r.get("p_survive") is None else r["p_survive"],
             _is_deferrable(r["position"], rounds_left),
             not _is_real_need(r["position"], counts, rounds_left),
             -r["championship_probability"],

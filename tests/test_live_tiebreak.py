@@ -224,3 +224,63 @@ def test_describe_tie_agrees_with_the_automatic_choice():
     chosen = choose_from_tied(rows, counts={}, rounds_left=12)
     assert chosen["name"] == "Scarce"
     assert f"**{chosen['name']}** costs the most to pass on" in describe_tie(rows)
+
+
+def test_zero_wait_cost_does_not_claim_the_player_will_last():
+    """The bug the owner caught by reading the app.
+
+    `wait_cost_pp` is zero whenever a *comparable* candidate is likely to
+    last, so it is zero for a 7%-to-survive player sitting beside a 69% one.
+    The callout used to render that as "free to pass" and then summarise the
+    list as "they are all likely to last until your next turn" -- false, and
+    exactly backwards for the player you were most at risk of losing.
+    """
+    rows = [
+        _tied_row("Scarce", position="RB", wait=0.0, survive=0.07, champ=0.21),
+        _tied_row("Available", position="TE", wait=0.0, survive=0.69, champ=0.22),
+    ]
+    text = describe_tie(rows)
+
+    assert "likely to last" not in text
+    assert "free to pass" not in text
+    # Survival is stated for every candidate, and stated first.
+    assert "**7%** likely to still be there" in text
+    assert "**69%** likely to still be there" in text
+    # And the advice is the actionable one: take the scarce player, because
+    # that is how you most likely end up with both.
+    assert "**Scarce** is the least likely to survive (7%)" in text
+
+
+def test_no_urgency_still_says_so_when_everybody_really_does_survive():
+    """The opposite branch must not be lost to the fix above."""
+    rows = [
+        _tied_row("A", wait=0.0, survive=0.88),
+        _tied_row("B", wait=0.0, survive=0.96),
+    ]
+    text = describe_tie(rows)
+    assert "All of them are likely to last" in text
+    assert "least likely to survive" not in text
+
+
+def test_automatic_choice_takes_the_scarce_player_on_a_tie_of_zero_costs():
+    """`choose_from_tied` had the same blind spot: with every wait cost at
+    zero it fell through to championship probability and took the *available*
+    player over the scarce one, losing the scarce one for nothing."""
+    rows = [
+        _tied_row("Scarce", position="RB", wait=0.0, survive=0.07, champ=0.21),
+        _tied_row("Available", position="TE", wait=0.0, survive=0.69, champ=0.22),
+    ]
+    assert choose_from_tied(rows, counts={}, rounds_left=12)["name"] == "Scarce"
+    # ...and the callout must not name a different player than the chooser.
+    assert "**Scarce** is the least likely to survive" in describe_tie(rows)
+
+
+def test_a_real_wait_cost_still_outranks_mere_scarcity():
+    """Scarcity is the second key, not the first: a candidate who actually
+    costs equity to pass beats one who is merely unlikely to survive."""
+    rows = [
+        _tied_row("Costly", position="WR", wait=1.20, survive=0.40, champ=0.30),
+        _tied_row("Scarcer", position="RB", wait=0.0, survive=0.05, champ=0.20),
+    ]
+    assert choose_from_tied(rows, counts={}, rounds_left=12)["name"] == "Costly"
+    assert "**Costly** costs the most to pass on (1.20pp)" in describe_tie(rows)

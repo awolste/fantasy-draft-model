@@ -993,11 +993,19 @@ Three deliberate refusals, each of which the first version got wrong and a brows
 
 Three cases, because the honest advice genuinely differs: no next turn (nothing to wait for — fall back to judgement); somebody is unlikely to last (name him); everybody is likely to last (say there is no urgency, rather than manufacturing a reason to hurry). Zero wait costs break ties on survival, because the cost is clamped to zero once a likely survivor scores as well — so a coin-flip player can read 0.00pp and still deserve to be read first.
 
+**Corrected same day, after the owner read it in the app.** `wait_cost_pp` is zero whenever a *comparable* candidate is likely to last — so it is zero for a player who is **7%** to survive sitting beside one who is 69%. The first version rendered that as "free to pass" and then summarised the whole list as *"they are all likely to last until your next turn"*, which was flatly false, and false in the worst direction: about the one player you were most at risk of losing.
+
+**A zero cost means "your fallback is as good", never "he will be there".** The callout now states survival first on every line, and never infers availability from a zero cost. When the costs are all zero but somebody is scarce, the advice is the actionable one — title equity is exhausted, so take the scarce player, because that is how you most likely end up with two of these rather than one.
+
+`choose_from_tied` had the identical blind spot: with every wait cost at zero it fell through to championship probability and took the *available* player over the scarce one, losing the scarce one for nothing. `p_survive` is now its second key, right after `wait_cost_pp`. That also subsumes the K/D-ST demotion in the common case — kickers survive at ~100%, so ascending survival sorts them last on its own.
+
 Live at pick 8 it renders:
 
-> **4 candidates are statistically indistinguishable from the leader.** … Decide on **availability** instead — expected title equity lost by passing now:
-> - **Ja'Marr Chase** (WR) — 3.32pp to pass · 27% still there next turn
-> - **Josh Allen** (QB) — free to pass · 100% still there next turn
+> **2 candidates are statistically indistinguishable from the leader.** … Decide on **availability** instead:
+> - **Chase Brown** (RB) — **7%** likely to still be there · passing costs nothing extra
+> - **Brock Bowers** (TE) — **69%** likely to still be there · passing costs nothing extra
+>
+> Nobody costs extra to pass, because whoever you skip has a comparable fallback still on the board — that is **not** the same as everyone lasting. **Chase Brown** is the least likely to survive (7%), so taking him is how you most likely end up with two of these rather than one.
 
 ### Player photos — asked, measured, declined 2026-08-22
 
@@ -1275,6 +1283,7 @@ Worst case **16.7s, leaving 28.3s of clock** to read the table and enter the pic
 | The pick-tree page works (with screenshots) | It was blank. I verified a retyped copy, never the generated file. |
 | The live app "must stay serial" — Streamlit has no `__main__` guard | The guard was never the requirement. `spawn` skips the main module when it has no `__spec__` and no `__file__`; the app now runs 8 workers. Reasoned about Streamlit instead of testing it, again (§15). |
 | `cProfile` shows the rollout is 62% of a call | Ablation says the season simulator is the larger half. The profiler inflates call-heavy code, which is exactly what the rollout is. |
+| A zero `wait_cost_pp` means the player is likely to last | It means a *comparable* player is likely to last. The callout said "free to pass · 7% still there" and summarised it as "all likely to last" — false about the very player most at risk. Caught by the owner reading the app, not by a test. |
 
 **Two structural facts found while digging, both worth more than the bug that surfaced them:**
 
