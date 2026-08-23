@@ -15,6 +15,7 @@ Both rules here exist because a full mock draft exposed concrete defects:
 from __future__ import annotations
 
 from ffdraft.live.tiebreak import (
+    describe_tie,
     LATE_FILL_POSITIONS,
     POSITION_CAPS,
     choose_from_tied,
@@ -143,3 +144,83 @@ def test_late_fill_positions_are_the_documented_ones():
 def test_untied_leader_is_returned_unchanged():
     rows = [_row("leader", "RB", 0.30, tied=True), _row("other", "WR", 0.10, tied=False)]
     assert choose_from_tied(rows, counts={}, rounds_left=10)["name"] == "leader"
+
+
+# ---------------------------------------------------------------------------
+# Explaining a tie
+
+
+def _tied_row(name, position="RB", wait=0.0, survive=1.0, champ=0.2):
+    return {
+        "player_id": name.lower(),
+        "name": name,
+        "position": position,
+        "championship_probability": champ,
+        "indistinguishable_from_leader": True,
+        "wait_cost_pp": wait,
+        "p_survive": survive,
+    }
+
+
+def test_describe_tie_says_why_rather_than_only_that():
+    """The flag is routinely misread as 'the numbers differ, so why equal'.
+    The explanation has to name the actual reason."""
+    text = describe_tie([_tied_row("A"), _tied_row("B")])
+    assert "uncertainty" in text
+    assert "carries no information" in text
+
+
+def test_describe_tie_orders_by_wait_cost_not_by_championship_probability():
+    """Ordering a tie by the objective it is tied on would invite reading
+    the tie as a ranking."""
+    rows = [
+        _tied_row("Safe", wait=0.0, survive=0.99, champ=0.30),
+        _tied_row("Scarce", wait=0.94, survive=0.19, champ=0.21),
+    ]
+    text = describe_tie(rows)
+    assert text.index("Scarce") < text.index("Safe")
+    assert "**Scarce** costs the most to pass on" in text
+
+
+def test_describe_tie_breaks_zero_wait_cost_ties_by_survival():
+    """Wait cost is clamped to zero once a likely survivor scores as well,
+    so a coin-flip player can read 0 and still deserve to come first."""
+    rows = [
+        _tied_row("Certain", wait=0.0, survive=0.99),
+        _tied_row("CoinFlip", wait=0.0, survive=0.49),
+    ]
+    text = describe_tie(rows)
+    assert text.index("CoinFlip") < text.index("Certain")
+
+
+def test_describe_tie_says_no_urgency_when_everybody_survives():
+    """'Nothing to hurry about' is a real answer; manufacturing a reason to
+    pick one would be worse than saying so."""
+    text = describe_tie([_tied_row("A", survive=0.95), _tied_row("B", survive=0.99)])
+    assert "No urgency" in text
+    assert "costs the most to pass on" not in text
+
+
+def test_describe_tie_falls_back_to_judgement_at_our_last_pick():
+    """No next turn means survival cannot inform the choice at all."""
+    rows = [
+        _tied_row("A", wait=None, survive=None),
+        _tied_row("B", wait=None, survive=None),
+    ]
+    for r in rows:
+        r["wait_cost_pp"] = None
+        r["p_survive"] = None
+    text = describe_tie(rows)
+    assert "no later turn" in text
+    assert "availability" not in text
+
+
+def test_describe_tie_agrees_with_the_automatic_choice():
+    """The callout and `choose_from_tied` must not name different players."""
+    rows = [
+        _tied_row("Safe", position="WR", wait=0.0, survive=0.99, champ=0.30),
+        _tied_row("Scarce", position="RB", wait=0.94, survive=0.19, champ=0.21),
+    ]
+    chosen = choose_from_tied(rows, counts={}, rounds_left=12)
+    assert chosen["name"] == "Scarce"
+    assert f"**{chosen['name']}** costs the most to pass on" in describe_tie(rows)

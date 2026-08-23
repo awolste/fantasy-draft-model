@@ -52,7 +52,11 @@ from ffdraft.live.cache import candidates_to_rows, recommend, state_key
 from ffdraft.live.context import live_context
 from ffdraft.live.roster_view import league_standing, team_view
 from ffdraft.live.state import DraftBoard
-from ffdraft.live.tiebreak import best_uncapped_available, filter_capped
+from ffdraft.live.tiebreak import (
+    best_uncapped_available,
+    describe_tie,
+    filter_capped,
+)
 from ffdraft.live.survival import (
     DEFAULT_N_SIMS,
     annotate_rows,
@@ -362,12 +366,7 @@ def _render_recommendation(board, ctx) -> None:
         rows = [fb] if fb else rows
     tied = [r for r in rows if r["indistinguishable_from_leader"]]
     if len(tied) > 1:
-        names = ", ".join(r["name"] for r in tied)
-        st.info(
-            f"**{len(tied)} candidates are statistically indistinguishable "
-            f"from the leader**: {names}. Treat them as equivalent and use "
-            "your own judgement — need, injury news, bye weeks."
-        )
+        st.info(describe_tie(tied))
 
     st.dataframe(
         [

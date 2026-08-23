@@ -128,6 +128,86 @@ def _is_deferrable(position: str, rounds_left: int) -> bool:
     return position in LATE_FILL_POSITIONS and rounds_left > LATE_FILL_WINDOW
 
 
+def describe_tie(tied: Sequence[dict]) -> str:
+    """Markdown explaining a tie, and what to decide on instead.
+
+    The flag is routinely read as "these have different numbers, why is the
+    tool calling them equal" -- so this says the actual reason once
+    (the gaps are smaller than the uncertainty *in* the gaps) and then
+    redirects to the dimension that is still informative.
+
+    **Ordered by `wait_cost_pp`, not by championship probability.** Once
+    the model cannot separate the candidates on title equity, the ranking
+    it is displayed in carries no information, and leading with it invites
+    reading a tie as an ordering. Availability does carry information, and
+    it is the first key `choose_from_tied` sorts on, so the callout and the
+    automatic choice agree by construction.
+
+    Three cases, because the honest advice genuinely differs:
+
+    * no next turn (our last pick) -- nothing to wait for, so fall back to
+      judgement;
+    * somebody is unlikely to last -- name him;
+    * everybody is likely to last -- say so, because "no urgency" is a
+      real answer and inventing a reason to hurry would be worse.
+    """
+    n = len(tied)
+    head = (
+        f"**{n} candidates are statistically indistinguishable from the leader.** "
+        f"The gaps between them are smaller than the uncertainty *in* those gaps, "
+        f"so the order they are listed in carries no information."
+    )
+
+    rated = [r for r in tied if r.get("wait_cost_pp") is not None]
+    if not rated:
+        return (
+            f"{head} There is no later turn to weigh them against, so use your "
+            f"own judgement — need, injury news, bye weeks."
+        )
+
+    # Secondary key: among candidates that cost nothing to pass, the one
+    # least likely to survive still deserves to be read first. Wait cost
+    # can be zero for a coin-flip survivor -- it is clamped once a likely
+    # survivor scores as well as he does -- and sorting on cost alone would
+    # bury a 49% player behind a 99% one.
+    ranked = sorted(
+        rated,
+        key=lambda r: (-(r["wait_cost_pp"] or 0.0),
+                       1.0 if r.get("p_survive") is None else r["p_survive"]),
+    )
+    lines = "\n".join(
+        f"- **{r['name']}** ({r['position']}) — "
+        + (
+            f"{r['wait_cost_pp']:.2f}pp to pass"
+            if r["wait_cost_pp"]
+            else "free to pass"
+        )
+        + (
+            f" · {r['p_survive'] * 100:.0f}% still there next turn"
+            if r.get("p_survive") is not None
+            else ""
+        )
+        for r in ranked
+    )
+
+    top = ranked[0]
+    if top["wait_cost_pp"]:
+        tail = (
+            f"\n\n**{top['name']}** costs the most to pass on — he is the one "
+            f"least likely to be there at your next pick."
+        )
+    else:
+        tail = (
+            "\n\nNone of them costs anything to pass on: they are all likely to "
+            "last until your next turn. No urgency here — decide on roster need."
+        )
+
+    return (
+        f"{head} Decide on **availability** instead — expected title equity "
+        f"lost by passing now:\n\n{lines}{tail}"
+    )
+
+
 def choose_from_tied(
     rows: Sequence[dict],
     counts: Mapping[str, int],

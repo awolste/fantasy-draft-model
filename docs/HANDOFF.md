@@ -37,7 +37,7 @@ Full K and DST scoring rules are in the spec. Two bands are **neutral, not missi
 | 4 | Live draft assistant | **Complete** (live-only; + survival columns, position caps, scarcity tie-break) |
 | — | Draft-day aids | **Complete** — precomputed 6-round pick tree + interactive explorer (§14); "My team" lineup panel (§11) |
 
-**All four stages are merged and pushed to `origin/main`. 452 tests pass in ~2:10** on the native arm64 venv. **A live recommendation costs ~1.4s** against a 90-second pick clock, down from 12.4s, with output identical at every step — two optimisation passes, §15.
+**All four stages are merged and pushed to `origin/main`. 458 tests pass in ~2:10** on the native arm64 venv. **A live recommendation costs ~1.4s** against a 90-second pick clock, down from 12.4s, with output identical at every step — two optimisation passes, §15.
 
 > **Read §7e before trusting any performance claim on this page.** The engine wins 2020-2022 and *loses* 2023 and 2024, and the pooled edge over ADP averages those two opposite regimes together. The two seasons most like 2026 are the two it loses. This is open item 1 and it is unresolved.
 
@@ -147,7 +147,7 @@ In real drafts those top-4 numbers are close to zero — nobody passes on the co
 3. **QB=3 and K=2 are cap-bound in every rollout.** The value function still ranks a third QB and second kicker above better alternatives; a policy guard (`MAX_EXTRA_BENCH_NO_FLEX`) is the only thing stopping it. That is masking, not fixing, and costs ~2 roster spots versus opponents' 1.7 QB / 1.2 K. `value.py` has been through three fix rounds; a fourth patch is probably the wrong move — consider whether greedy marginal value is the right policy at all.
 4. **Between-rollout variance appears state-dependent and is unresolved.** Measured 3.50pp at pick 8 (n=50) but 5.97pp in an independent 10-seed check at a different state. The staleness guard catches drift over time but will not tell you the allocation is too tight at some other draft state.
 5. ~~A recommendation costs ~5.6 minutes, too slow for a live draft.~~ **RESOLVED in Stage 4 (§11), and no longer a constraint at all.** The live tool uses a measured reduced budget (12×16×300), which cost 35.7s at our worst pick when it was chosen and costs **~1.4s** after the two optimisation passes in §15. Precompute was built and dropped after measuring a 9–17% hit rate; at 1.4s there is nothing left for it to buy.
-6. **Test suite takes ~2:10** for 452 tests (~7:40 before the 2026-08-11 speedup, ~12 min under Rosetta; §15). Still dominated by the pick-8/pick-13 real-data tests running full production budgets; pinning a smaller explicit budget there is still worth doing.
+6. **Test suite takes ~2:10** for 458 tests (~7:40 before the 2026-08-11 speedup, ~12 min under Rosetta; §15). Still dominated by the pick-8/pick-13 real-data tests running full production budgets; pinning a smaller explicit budget there is still worth doing.
 7. **`sources/nflverse.py` imports `models/kicking.py`** — a Stage 1 → Stage 2 layering inversion. Cheap to fix by moving `kicking.py` beside `scoring.py`.
 8. ~~Python runs under Rosetta x86-64 emulation.~~ **RESOLVED 2026-08-08.** Native arm64 CPython 3.11.15 installed via `uv python install cpython-3.11-macos-aarch64-none`; `.venv` is now native and the x86_64 one is deleted. Suite went 11:30 → ~7:40, and the intermittent native crashes and silent numeric corruption are gone (§10b, §10c). Never set `POLARS_SKIP_CPU_CHECK=1`.
 
@@ -984,6 +984,20 @@ Three deliberate refusals, each of which the first version got wrong and a brows
 - **The empty-slot count is printed next to both point figures.** An empty slot scores at replacement level, never zero, so early on most of "100.0 pts/wk" is filler and the panel says so.
 
 **A team's projection can go *down* when it drafts**, and that is the engine's convention rather than a bug: `solve_lineup` treats replacement level as a quantity trigger, not a quality one, so once a real body occupies a slot he starts even if he projects below the level the empty slot was scored at. Observed live — a deep-bench receiver dropped that team below the all-replacement floor. Applied identically to all ten teams, so the ranking stays consistent.
+
+### The tie callout names what to decide on instead — 2026-08-22
+
+`indistinguishable_from_leader` is routinely misread as "the numbers are different, why is the tool calling them equal". The callout now says the reason once — **the gaps between them are smaller than the uncertainty *in* those gaps** — and then redirects to the dimension that is still informative.
+
+`tiebreak.describe_tie` lists the tied candidates **ordered by `wait_cost_pp`, not by championship probability**. Once the model cannot separate them on title equity, the order they are ranked in carries no information, and leading with it invites reading a tie as an ordering. Availability does carry information, and it is the first key `choose_from_tied` already sorts on, so the callout and the automatic choice agree by construction (pinned by a test).
+
+Three cases, because the honest advice genuinely differs: no next turn (nothing to wait for — fall back to judgement); somebody is unlikely to last (name him); everybody is likely to last (say there is no urgency, rather than manufacturing a reason to hurry). Zero wait costs break ties on survival, because the cost is clamped to zero once a likely survivor scores as well — so a coin-flip player can read 0.00pp and still deserve to be read first.
+
+Live at pick 8 it renders:
+
+> **4 candidates are statistically indistinguishable from the leader.** … Decide on **availability** instead — expected title equity lost by passing now:
+> - **Ja'Marr Chase** (WR) — 3.32pp to pass · 27% still there next turn
+> - **Josh Allen** (QB) — free to pass · 100% still there next turn
 
 ### Player photos — asked, measured, declined 2026-08-22
 
