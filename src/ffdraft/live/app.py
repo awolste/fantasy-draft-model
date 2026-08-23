@@ -50,6 +50,7 @@ from ffdraft.league import DRAFT_SLOT, N_TEAMS
 from ffdraft.live.budget import FULL_BUDGET, LIVE_BUDGET
 from ffdraft.live.cache import candidates_to_rows, recommend, state_key
 from ffdraft.live.context import live_context
+from ffdraft.live.roster_view import league_standing, team_view
 from ffdraft.live.state import DraftBoard
 from ffdraft.live.tiebreak import best_uncapped_available, filter_capped
 from ffdraft.live.survival import (
@@ -73,6 +74,99 @@ def _context():
     """Fitting the context takes a few seconds; do it once per session, not
     once per pick."""
     return live_context()
+
+
+@st.cache_resource
+def _replacement_means(_ctx):
+    """position -> replacement-level weekly points, flat, resolved once."""
+    return {pos: float(dist.mean) for pos, dist in _ctx.replacement_by_position.items()}
+
+
+def _render_team(board, ctx):
+    """Our roster as a starting lineup, with whatever the model can say
+    about it right now.
+
+    Three numbers, and they answer different questions -- which is why they
+    are labelled rather than stacked as a dashboard:
+
+    * **Title chance** is the only one that comes from the simulation. It
+      is the leader candidate's championship probability, i.e. "if you take
+      the recommended player and keep drafting this way". It exists only at
+      our own picks, so it is stamped with the pick it was computed at and
+      goes stale deliberately visibly rather than silently.
+    * **Proj starters** is a projection sum, not an outcome, and early on
+      most of it is replacement level -- so the count of still-empty slots
+      is printed next to it every time.
+    * **Lineup rank** needs no simulation at all; the board already knows
+      every team's picks. It compresses badly early (everyone is mostly
+      replacement level), and it is not championship probability.
+    """
+    st.subheader("My team")
+
+    view = team_view(board.our_roster_pairs, ctx.pool, _replacement_means(ctx))
+    standing = league_standing(
+        board.picks, ctx.pool, _replacement_means(ctx), board.n_teams, board.our_team
+    )
+
+    title = st.session_state.get("last_title")
+    c1, c2 = st.columns(2)
+    with c1:
+        if title is None:
+            st.metric("Title chance", "—")
+            st.caption("Computed at your pick.")
+        else:
+            st.metric("Title chance", f"{title['prob'] * 100:.1f}%")
+            fresh = title["pick"] == board.next_overall_pick
+            st.caption(
+                f"±{title['se'] * 100:.2f}pp · if you take **{title['name']}**"
+                if fresh
+                # Deliberately drops the player's name once stale: by then
+                # you may well have drafted him, and "Ja'Marr Chase may be
+                # gone" is a strange thing to read about your own WR1.
+                else f"as of your pick {title['pick']} · **stale**, the board has moved since"
+            )
+    with c2:
+        # Every team identical means nobody is ahead. Ties share the better
+        # rank, so this would otherwise read "1 of 10" at pick 1 -- a
+        # first-place finish awarded for having drafted nobody.
+        all_tied = len(set(standing.points_by_team)) == 1
+        st.metric("Lineup rank", "—" if all_tied else f"{standing.rank} of {standing.n_teams}")
+        st.caption(
+            "every roster is still empty"
+            if all_tied
+            else f"by projection · {standing.points:.1f} pts/wk"
+        )
+
+    if view.n_replacement:
+        st.caption(
+            f"⚠️ {view.n_replacement} of {len(view.starters)} starting slots are still "
+            f"empty and scored at replacement level, so both numbers above are "
+            f"mostly filler this early."
+        )
+
+    st.dataframe(
+        [
+            {
+                "slot": s.label,
+                "player": s.name or "—",
+                "proj": round(s.projected_points, 1),
+            }
+            for s in view.starters
+        ],
+        hide_index=True,
+        width="stretch",
+    )
+
+    if view.bench:
+        st.caption(f"Bench ({len(view.bench)})")
+        st.dataframe(
+            [
+                {"player": b.name, "pos": b.position, "proj": round(b.projected_points, 1)}
+                for b in view.bench
+            ],
+            hide_index=True,
+            width="stretch",
+        )
 
 
 def _memoized_recommendation(key, board, ctx):
@@ -134,7 +228,7 @@ def main() -> None:
         st.session_state.board = DraftBoard()
     board: DraftBoard = st.session_state.board
 
-    left, right = st.columns([1, 2])
+    left, middle, right = st.columns([1.1, 2.1, 1.3])
 
     with left:
         st.subheader(
@@ -202,79 +296,102 @@ def main() -> None:
                 hide_index=True,
                 width="stretch",
             )
-        st.caption(f"Our roster: {board.our_roster_counts or '(empty)'}")
+
+    with middle:
+        _render_recommendation(board, ctx)
 
     with right:
-        if board.is_complete:
-            st.success("Draft complete.")
-            return
-        if not board.is_our_turn:
-            remaining = next(
-                (n for n in board.our_pick_numbers if n >= board.next_overall_pick),
-                None,
-            )
-            st.info(
-                f"Team {board.team_on_clock} is on the clock. "
-                f"Our next pick: overall {remaining}."
-            )
-            return
+        _render_team(board, ctx)
 
-        st.subheader("Recommendation")
-        key = state_key(
-            board.next_overall_pick, board.our_roster_counts, board.drafted_ids, ctx.pool
+
+def _render_recommendation(board, ctx) -> None:
+    """The middle column.
+
+    Split out of `main` when the team view arrived: it used to `return`
+    early when it was not our turn, which would now also skip rendering the
+    team beside it.
+    """
+    if board.is_complete:
+        st.success("Draft complete.")
+        return
+    if not board.is_our_turn:
+        remaining = next(
+            (n for n in board.our_pick_numbers if n >= board.next_overall_pick),
+            None,
         )
-        (rows, elapsed), from_memo = _memoized_recommendation(key, board, ctx)
-        st.caption(
-            f"**live** · budget {LIVE_BUDGET.label} · {elapsed:.1f}s"
-            + (" · reused from this session (board unchanged)" if from_memo else "")
-            + f" · full budget for reference is {FULL_BUDGET.label}"
+        st.info(
+            f"Team {board.team_on_clock} is on the clock. "
+            f"Our next pick: overall {remaining}."
+        )
+        return
+
+    st.subheader("Recommendation")
+    key = state_key(
+        board.next_overall_pick, board.our_roster_counts, board.drafted_ids, ctx.pool
+    )
+    (rows, elapsed), from_memo = _memoized_recommendation(key, board, ctx)
+    st.caption(
+        f"**live** · budget {LIVE_BUDGET.label} · {elapsed:.1f}s"
+        + (" · reused from this session (board unchanged)" if from_memo else "")
+        + f" · full budget for reference is {FULL_BUDGET.label}"
+    )
+
+    # Stamp the leader's simulated probability for the team panel BEFORE
+    # the cap filter and the uncapped fallback touch `rows` -- the
+    # fallback row was never simulated and carries no title equity, so
+    # reading the metric off the filtered list would invent one.
+    st.session_state['last_title'] = {
+        'pick': board.next_overall_pick,
+        'prob': rows[0]['championship_probability'],
+        'se': rows[0]['standard_error'],
+        'name': rows[0]['name'],
+    }
+
+    capped_out = filter_capped(rows, board.our_roster_counts)
+    if capped_out:
+        rows = capped_out
+    else:
+        fb = best_uncapped_available(
+            ctx.pool, board.drafted_ids, board.our_roster_counts, _adp_lookup(ctx)
+        )
+        st.warning(
+            "Every simulated candidate is at a position you already have "
+            "enough of (QB≤2, K≤1). Showing the best uncapped player by ADP "
+            "instead — he was **not** simulated, so he has no title equity."
+        )
+        rows = [fb] if fb else rows
+    tied = [r for r in rows if r["indistinguishable_from_leader"]]
+    if len(tied) > 1:
+        names = ", ".join(r["name"] for r in tied)
+        st.info(
+            f"**{len(tied)} candidates are statistically indistinguishable "
+            f"from the leader**: {names}. Treat them as equivalent and use "
+            "your own judgement — need, injury news, bye weeks."
         )
 
-        capped_out = filter_capped(rows, board.our_roster_counts)
-        if capped_out:
-            rows = capped_out
-        else:
-            fb = best_uncapped_available(
-                ctx.pool, board.drafted_ids, board.our_roster_counts, _adp_lookup(ctx)
-            )
-            st.warning(
-                "Every simulated candidate is at a position you already have "
-                "enough of (QB≤2, K≤1). Showing the best uncapped player by ADP "
-                "instead — he was **not** simulated, so he has no title equity."
-            )
-            rows = [fb] if fb else rows
-        tied = [r for r in rows if r["indistinguishable_from_leader"]]
-        if len(tied) > 1:
-            names = ", ".join(r["name"] for r in tied)
-            st.info(
-                f"**{len(tied)} candidates are statistically indistinguishable "
-                f"from the leader**: {names}. Treat them as equivalent and use "
-                "your own judgement — need, injury news, bye weeks."
-            )
-
-        st.dataframe(
-            [
-                {
-                    "player": r["name"],
-                    "pos": r["position"],
-                    "title %": round(r["championship_probability"] * 100, 2),
-                    "± SE": round(r["standard_error"] * 100, 2),
-                    "gap (pp)": round(r["gap_from_leader_pp"], 2),
-                    "survives %": (
-                        None if r.get("p_survive") is None
-                        else round(r["p_survive"] * 100)
-                    ),
-                    "wait cost (pp)": (
-                        None if r.get("wait_cost_pp") is None
-                        else round(r["wait_cost_pp"], 2)
-                    ),
-                    "tied w/ leader": r["indistinguishable_from_leader"],
-                }
-                for r in rows
-            ],
-            hide_index=True,
-            width="stretch",
-        )
+    st.dataframe(
+        [
+            {
+                "player": r["name"],
+                "pos": r["position"],
+                "title %": round(r["championship_probability"] * 100, 2),
+                "± SE": round(r["standard_error"] * 100, 2),
+                "gap (pp)": round(r["gap_from_leader_pp"], 2),
+                "survives %": (
+                    None if r.get("p_survive") is None
+                    else round(r["p_survive"] * 100)
+                ),
+                "wait cost (pp)": (
+                    None if r.get("wait_cost_pp") is None
+                    else round(r["wait_cost_pp"], 2)
+                ),
+                "tied w/ leader": r["indistinguishable_from_leader"],
+            }
+            for r in rows
+        ],
+        hide_index=True,
+        width="stretch",
+    )
 
 
 main()

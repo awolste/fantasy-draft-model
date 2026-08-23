@@ -35,9 +35,9 @@ Full K and DST scoring rules are in the spec. Two bands are **neutral, not missi
 | 2 | Player + season model | **Complete**, merged to `main` |
 | 3 | Opponent model + optimizer | **Complete (7 of 7)**, merged to `main` |
 | 4 | Live draft assistant | **Complete** (live-only; + survival columns, position caps, scarcity tie-break) |
-| — | Draft-day aids | **Complete** — precomputed 6-round pick tree + interactive explorer (§14) |
+| — | Draft-day aids | **Complete** — precomputed 6-round pick tree + interactive explorer (§14); "My team" lineup panel (§11) |
 
-**All four stages are merged and pushed to `origin/main`. 440 tests pass in ~2:05** on the native arm64 venv. **A live recommendation costs ~1.4s** against a 90-second pick clock, down from 12.4s, with output identical at every step — two optimisation passes, §15.
+**All four stages are merged and pushed to `origin/main`. 452 tests pass in ~2:10** on the native arm64 venv. **A live recommendation costs ~1.4s** against a 90-second pick clock, down from 12.4s, with output identical at every step — two optimisation passes, §15.
 
 > **Read §7e before trusting any performance claim on this page.** The engine wins 2020-2022 and *loses* 2023 and 2024, and the pooled edge over ADP averages those two opposite regimes together. The two seasons most like 2026 are the two it loses. This is open item 1 and it is unresolved.
 
@@ -147,7 +147,7 @@ In real drafts those top-4 numbers are close to zero — nobody passes on the co
 3. **QB=3 and K=2 are cap-bound in every rollout.** The value function still ranks a third QB and second kicker above better alternatives; a policy guard (`MAX_EXTRA_BENCH_NO_FLEX`) is the only thing stopping it. That is masking, not fixing, and costs ~2 roster spots versus opponents' 1.7 QB / 1.2 K. `value.py` has been through three fix rounds; a fourth patch is probably the wrong move — consider whether greedy marginal value is the right policy at all.
 4. **Between-rollout variance appears state-dependent and is unresolved.** Measured 3.50pp at pick 8 (n=50) but 5.97pp in an independent 10-seed check at a different state. The staleness guard catches drift over time but will not tell you the allocation is too tight at some other draft state.
 5. ~~A recommendation costs ~5.6 minutes, too slow for a live draft.~~ **RESOLVED in Stage 4 (§11), and no longer a constraint at all.** The live tool uses a measured reduced budget (12×16×300), which cost 35.7s at our worst pick when it was chosen and costs **~1.4s** after the two optimisation passes in §15. Precompute was built and dropped after measuring a 9–17% hit rate; at 1.4s there is nothing left for it to buy.
-6. **Test suite takes ~2:05** for 440 tests (~7:40 before the 2026-08-11 speedup, ~12 min under Rosetta; §15). Still dominated by the pick-8/pick-13 real-data tests running full production budgets; pinning a smaller explicit budget there is still worth doing.
+6. **Test suite takes ~2:10** for 452 tests (~7:40 before the 2026-08-11 speedup, ~12 min under Rosetta; §15). Still dominated by the pick-8/pick-13 real-data tests running full production budgets; pinning a smaller explicit budget there is still worth doing.
 7. **`sources/nflverse.py` imports `models/kicking.py`** — a Stage 1 → Stage 2 layering inversion. Cheap to fix by moving `kicking.py` beside `scoring.py`.
 8. ~~Python runs under Rosetta x86-64 emulation.~~ **RESOLVED 2026-08-08.** Native arm64 CPython 3.11.15 installed via `uv python install cpython-3.11-macos-aarch64-none`; `.venv` is now native and the x86_64 one is deleted. Suite went 11:30 → ~7:40, and the intermittent native crashes and silent numeric corruption are gone (§10b, §10c). Never set `POLARS_SKIP_CPU_CHECK=1`.
 
@@ -962,7 +962,38 @@ Streamlit re-executes the entire script on every interaction. The first version 
 2. `.venv/bin/streamlit run src/ffdraft/live/app.py`
 3. Load the page **before** the draft starts — fitting the context takes a few seconds and is cached per session.
 4. Enter every pick as it happens, including opponents'. Undo fixes a mis-entry.
-5. At our pick the recommendation computes automatically. Read the tie callout before the ranking: candidates flagged indistinguishable from the leader are equivalent, and the ordering among them is noise.
+5. At our pick the recommendation computes automatically (~1.4s, §15). Read the tie callout before the ranking: candidates flagged indistinguishable from the leader are equivalent, and the ordering among them is noise.
+6. The **My team** column on the right is live at every pick, not just ours. Read its empty-slot warning before either of its point figures — early on, most of that total is replacement-level filler.
+
+### The "My team" panel — 2026-08-22
+
+A third column, beside pick entry and the recommendation. It shows a **solved starting lineup, not position counts**, because the counts dict gets exactly the two things wrong that matter on the clock: a third running back *is* a starter (via FLEX) and a second tight end usually is not. `live/roster_view.py` fills the real lineup with `sim.lineup.solve_lineup` — the same exactly-optimal solver the season simulator uses, scored on projected weekly mean — so the panel cannot disagree with the engine about who starts.
+
+Three numbers sit on top, and they answer different questions, which is why each is labelled rather than stacked as a dashboard:
+
+| number | where it comes from | when it exists |
+|---|---|---|
+| **Title chance** | the leader candidate's championship probability — "if you take the recommended player and keep drafting this way" | only at our own picks |
+| **Lineup rank** | ten `solve_lineup` calls over the board; **no simulation at all** | always |
+| **Proj pts/wk** | a projection sum, not an outcome | always |
+
+Three deliberate refusals, each of which the first version got wrong and a browser walk caught:
+
+- **Title chance goes visibly stale.** It is stamped with the pick it was computed at and says so, rather than sitting there looking current while the board moves under it. It is also captured *before* the position-cap filter runs: the uncapped fallback row was never simulated, so reading the metric off the filtered list would invent title equity for a player that has none.
+- **Lineup rank shows "—" when every roster is empty.** Ties share the better rank, so the first version awarded a first-place finish at pick 1 for having drafted nobody.
+- **The empty-slot count is printed next to both point figures.** An empty slot scores at replacement level, never zero, so early on most of "100.0 pts/wk" is filler and the panel says so.
+
+**A team's projection can go *down* when it drafts**, and that is the engine's convention rather than a bug: `solve_lineup` treats replacement level as a quantity trigger, not a quality one, so once a real body occupies a slot he starts even if he projects below the level the empty slot was scored at. Observed live — a deep-bench receiver dropped that team below the all-replacement floor. Applied identically to all ten teams, so the ranking stays consistent.
+
+### Player photos — asked, measured, declined 2026-08-22
+
+Recorded so the ID work is not re-derived by someone who assumes it is missing.
+
+**In the selector: not possible.** `st.selectbox` options are plain strings. Markdown `![]()`, a raw `<img>`, and even `**bold**` all render as literal text — tested, all three. This is not an image limitation; option labels are not rendered at all. The only built-in route to inline photos is replacing the dropdown with a filter box over a selectable `st.dataframe` (`on_select` row selection plus `ImageColumn`, both available in Streamlit 1.61) — which rewrites the entry flow, the one thing touched under a 90-second clock, and is slower to operate than typing four letters and pressing Enter.
+
+**The data would have been nearly free.** Pool `player_id`s *are* gsis_ids and `id_crosswalk` already carries `espn_id` and `sleeper_id`, so a direct join needs no name matching: **443 of 443 skill players match, 100%**; the 66 misses are exactly the 34 kickers and 32 defences, neither of which has a crosswalk row. Headshot URLs are then pure string formatting off `a.espncdn.com` or `sleepercdn.com` (both verified 200 with real image bytes, as is the ESPN team-logo endpoint for D/ST). No new source, no new ingest.
+
+**Declined by the owner: no images.** If it is ever revisited, the highest-value version is not photos in the list at all but a photo of the *selected* player beside the box — during verification the wrong player was recorded twice from the dropdown ("Luke McCaffrey" for Christian, "Chase Brown" for Ja'Marr), and a face beside the selection catches that error where photos inside a 509-row dropdown would not.
 
 ## 12. Draft-day ingest verification — 2026-08-08
 

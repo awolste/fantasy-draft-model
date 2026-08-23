@@ -72,6 +72,14 @@ class DraftBoard:
                 counts[p.position] = counts.get(p.position, 0) + 1
         return counts
 
+    @property
+    def our_roster_pairs(self) -> list[tuple[str, str]]:
+        """Our `(player_id, position)` picks in draft order -- the shape
+        `models.roster.build_roster` and `live.roster_view` both take."""
+        return [
+            (p.player_id, p.position) for p in self.picks if p.team == self.our_team
+        ]
+
     def record(self, player_id: str, position: str) -> None:
         if self.is_complete:
             raise ValueError(
