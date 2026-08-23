@@ -29,12 +29,13 @@ class Budget:
     """Processes to spread the candidates over. `1` (the default) is serial;
     `0` means "decide from this machine's core count" -- see `workers`.
 
-    **Serial by default on purpose.** Parallelism cannot change any number
-    (candidates are independent and their seeds are fixed in the parent), so
-    this is purely a wall-clock setting -- but it requires the calling
-    program to have an `if __name__ == "__main__"` guard, which a Streamlit
-    script does not have. See `draft.recommender._evaluate_all_candidates`.
-    Batch scripts with a `main()` entry point should pass `n_workers=0`."""
+    Parallelism cannot change any number: candidates are independent and
+    their seeds are fixed in the parent, so this is purely a wall-clock
+    setting. It once additionally required the calling program to have an
+    `if __name__ == "__main__"` guard, which ruled out the Streamlit app;
+    `draft.recommender._neutral_main` removed that requirement, and
+    `LIVE_BUDGET` now asks for workers. The dataclass default stays serial
+    so the small synthetic budgets in tests do not each pay for a pool."""
 
     @property
     def work(self) -> int:
@@ -98,12 +99,26 @@ FULL_BUDGET = Budget(
 #     LIVE_BUDGET (12x16x300)   35.6s  ->  12.6s  serial
 #                               35.6s  ->   3.2s  8 workers (10.7x)
 #
-# The parallel figure needs `n_workers=0` and a caller with a
-# `if __name__ == "__main__"` guard; the Streamlit app has neither and stays
-# serial deliberately. Output is bit-identical either way.
+# NOTE (2026-08-22): a second pass, again bit-identical -- verified by
+# diffing a full recommendation at three states plus raw rollouts and
+# survival, byte for byte. At pick 8 on the live 2026 board:
+#
+#     12.4s  before this pass, serial
+#      6.9s  + models.opponent.OpponentBoard (the opponent's pick
+#            distribution precomputed once instead of at every one of the
+#            ~29,760 opponent picks) and the argsort -> sort reduction in
+#            sim.season.solve_team_lineups_vectorized
+#      2.1s  + workers, first pick of a session
+#      1.4s  + workers, once the pool is warm
+#
+# Measured in the real Streamlit app, not a stand-in script. `n_workers=0`
+# below is what asks for them; the app no longer needs an
+# `if __name__ == "__main__"` guard to use them (see
+# `draft.recommender._neutral_main`). Output is bit-identical either way.
 #
 # The budgets themselves were left alone rather than quietly widened: the
 # leader was already identical at every budget measured, so the headroom is
 # available to spend on precision if wanted, but spending it is a decision
 # to take deliberately and re-measure, not a side effect of an optimisation.
-LIVE_BUDGET = Budget(n_candidates=12, n_rollouts=16, n_sims_per_rollout=300, seed=20260804)
+LIVE_BUDGET = Budget(n_candidates=12, n_rollouts=16, n_sims_per_rollout=300, seed=20260804,
+                     n_workers=0)

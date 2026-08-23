@@ -7,8 +7,16 @@ drafts found 203/248/269 distinct states at our first three picks, so the
 8 most common covered only 17.0%/11.3%/9.0% of drafts. Nearly every state
 occurs exactly once -- the space is irreducibly large at the granularity
 that changes a recommendation. ~78 minutes of precompute bought roughly one
-pick in eight; a live recommendation costs 13-36s and covers all of them.
-See HANDOFF section 11.
+pick in eight; a live recommendation covers all of them, and now costs
+1-2s. See HANDOFF section 11.
+
+**This page runs the recommender in parallel**, which it could not do
+until `draft.recommender._neutral_main` removed the requirement for an
+`if __name__ == "__main__"` guard that a Streamlit script cannot have. The
+worker pool is started on the first recommendation and kept for the rest of
+the session; measured here at pick 8, 2.1s on the first pick and 1.4s
+thereafter, against 12.4s before this pass. Any failure to start or use the
+pool falls back to the serial loop with a warning and identical numbers.
 
 Three things this page must always show, because each is a way the tool
 could otherwise mislead:
@@ -72,9 +80,11 @@ def _memoized_recommendation(key, board, ctx):
 
     Streamlit re-executes this whole script on every interaction. Without a
     memo, clicking Undo or touching the selectbox after a recommendation
-    appeared would re-run the simulation -- 35.7s at our first pick, on the
-    clock. Keyed by `state_key`, so a genuinely new board still costs
-    compute and a rerun at an unchanged board is instant.
+    appeared would re-run the simulation on the clock. That mattered more
+    when a pick cost 35.7s than it does at today's 1-2s, but it is still the
+    difference between an instant redraw and a visible stall. Keyed by
+    `state_key`, so a genuinely new board still costs compute and a rerun at
+    an unchanged board is free.
     """
     memo = st.session_state.setdefault("rec_memo", {})
     if key in memo:

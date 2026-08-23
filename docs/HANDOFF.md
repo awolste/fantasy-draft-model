@@ -37,7 +37,7 @@ Full K and DST scoring rules are in the spec. Two bands are **neutral, not missi
 | 4 | Live draft assistant | **Complete** (live-only; + survival columns, position caps, scarcity tie-break) |
 | — | Draft-day aids | **Complete** — precomputed 6-round pick tree + interactive explorer (§14) |
 
-**All four stages are merged and pushed to `origin/main`. 437 tests pass in ~3:20** on the native arm64 venv (both numbers improved 2026-08-11: `recommend_pick` is 10.7x faster with bit-identical output, §15).
+**All four stages are merged and pushed to `origin/main`. 440 tests pass in ~2:05** on the native arm64 venv. **A live recommendation costs ~1.4s** against a 90-second pick clock, down from 12.4s, with output identical at every step — two optimisation passes, §15.
 
 > **Read §7e before trusting any performance claim on this page.** The engine wins 2020-2022 and *loses* 2023 and 2024, and the pooled edge over ADP averages those two opposite regimes together. The two seasons most like 2026 are the two it loses. This is open item 1 and it is unresolved.
 
@@ -146,8 +146,8 @@ In real drafts those top-4 numbers are close to zero — nobody passes on the co
 
 3. **QB=3 and K=2 are cap-bound in every rollout.** The value function still ranks a third QB and second kicker above better alternatives; a policy guard (`MAX_EXTRA_BENCH_NO_FLEX`) is the only thing stopping it. That is masking, not fixing, and costs ~2 roster spots versus opponents' 1.7 QB / 1.2 K. `value.py` has been through three fix rounds; a fourth patch is probably the wrong move — consider whether greedy marginal value is the right policy at all.
 4. **Between-rollout variance appears state-dependent and is unresolved.** Measured 3.50pp at pick 8 (n=50) but 5.97pp in an independent 10-seed check at a different state. The staleness guard catches drift over time but will not tell you the allocation is too tight at some other draft state.
-5. ~~A recommendation costs ~5.6 minutes, too slow for a live draft.~~ **RESOLVED in Stage 4 (§11).** Full budget is now ~197s on native ARM, and the live tool uses a measured reduced budget (12×16×300) costing 35.7s at our worst pick and 13.1s at our last. Precompute was built and dropped after measuring a 9–17% hit rate.
-6. **Test suite takes ~3:20** for 437 tests (was ~7:40 before the 2026-08-11 speedup, §15; ~12 min under Rosetta). Still dominated by the pick-8/pick-13 real-data tests running full production budgets; pinning a smaller explicit budget there is still worth doing.
+5. ~~A recommendation costs ~5.6 minutes, too slow for a live draft.~~ **RESOLVED in Stage 4 (§11), and no longer a constraint at all.** The live tool uses a measured reduced budget (12×16×300), which cost 35.7s at our worst pick when it was chosen and costs **~1.4s** after the two optimisation passes in §15. Precompute was built and dropped after measuring a 9–17% hit rate; at 1.4s there is nothing left for it to buy.
+6. **Test suite takes ~2:05** for 440 tests (~7:40 before the 2026-08-11 speedup, ~12 min under Rosetta; §15). Still dominated by the pick-8/pick-13 real-data tests running full production budgets; pinning a smaller explicit budget there is still worth doing.
 7. **`sources/nflverse.py` imports `models/kicking.py`** — a Stage 1 → Stage 2 layering inversion. Cheap to fix by moving `kicking.py` beside `scoring.py`.
 8. ~~Python runs under Rosetta x86-64 emulation.~~ **RESOLVED 2026-08-08.** Native arm64 CPython 3.11.15 installed via `uv python install cpython-3.11-macos-aarch64-none`; `.venv` is now native and the x86_64 one is deleted. Suite went 11:30 → ~7:40, and the intermittent native crashes and silent numeric corruption are gone (§10b, §10c). Never set `POLARS_SKIP_CPU_CHECK=1`.
 
@@ -753,7 +753,7 @@ ESPN cookies come from a logged-in browser: DevTools → Application → Cookies
 
 ```bash
 .venv/bin/python scripts/ingest_all.py    # pull + validate all nine datasets
-.venv/bin/pytest                          # ~3:20
+.venv/bin/pytest                          # ~2:05
 ```
 
 ### Draft-morning refresh (no ESPN cookies needed)
@@ -945,6 +945,8 @@ Two things make this better than the raw number. **Pick entry does not compete w
 
 Why not the 15×20×400 budget that also fits under 60s: the 90s clock must also cover entry, reading, and deciding. 35.6s leaves ~54s of human time against ~30s. The precision surrendered is 0.25pp of SE against the model's own 4.15pp between-season SE (§10) — a bad trade.
 
+> **The timings in this table are from when the budget was chosen (2026-08-04) and are kept as the record of that decision.** The same budget now costs ~1.4s (§15). The *choice* was deliberately left alone rather than quietly widened: the leader was identical at every budget measured, so spending the headroom is a decision to take and re-measure, not a side effect of an optimisation.
+
 ### The rerun hazard, and the memo
 
 Streamlit re-executes the entire script on every interaction. The first version called `recommend()` directly in the render path, so clicking Undo or touching the selectbox after a recommendation appeared would **re-run the simulation on the clock**. `app._memoized_recommendation` keys results by `state_key` in `st.session_state`: unchanged board → instant, genuinely new board → recompute. Pinned by `tests/test_live_app_paths.py::test_recommendation_is_memoized_by_state_key_not_recomputed`, including that an *undo* returns to a memo hit.
@@ -1093,7 +1095,11 @@ Roster shape is enforced by *feasibility*, not a fixed pattern: a position is of
 
 **How it shipped matters more than the typo.** The page was "verified" by pasting an equivalent script into a live browser and watching it work — the preview pane strips inline scripts, so the real artifact was never executed even once. Verifying a retyped copy of a deliverable is not verifying the deliverable. `build_pick_tree_page.py` now runs `node --check` on its own output and refuses to write a page that does not parse (proven by reintroducing the bug: exit 1, no file written).
 
-## 15. Performance — `recommend_pick` is 10.7x faster, bit-identical — 2026-08-11
+## 15. Performance — a live pick costs 1.4s, bit-identical throughout — 2026-08-11, second pass 2026-08-22
+
+Two passes, both held to the same bar: **the output must not move at all.** Not "within tolerance" — byte-identical, checked by diffing full recommendations rather than by argument. Read them in order; the second overturns one of the first's conclusions.
+
+### First pass — 34.2s → 3.2s, 2026-08-11
 
 34.2s → 3.2s at `LIVE_BUDGET`, verified against the *original* serial code at picks 8, 28 and 53: every candidate, championship probability and standard error identical. The test suite dropped 7:25 → 3:20 as a side effect.
 
@@ -1105,13 +1111,41 @@ Profiling, not guessing, found 61% of a call in one place: `value_available` sco
 
 **Parallelism is opt-in and OFF by default, deliberately.** Every start method available on macOS rebuilds a worker's namespace by executing the *main module*, so a caller without an `if __name__ == "__main__"` guard re-runs its own script in every worker — measured: a guardless script ran itself three times and finished **slower than serial** (44.9s vs 13.6s) while still printing the right answer. **A Streamlit script never has that guard**, so the live app stays serial (12.6s, comfortable against a 60-90s clock); batch scripts opt in with `n_workers=0`.
 
+> **Superseded 2026-08-22.** The premise was wrong, not the measurement. `spawn` re-executes `__main__` only when `__main__` has a `__spec__` or a `__file__`; a module with neither is skipped entirely. The guard was never the *requirement*, only the usual way of satisfying it — so the app can and now does use workers. See the second pass below.
+
 Two dead ends recorded so they are not retried: `forkserver` does *not* avoid importing `__main__` (it only moves which process does it), and preloading this package into the forkserver crashed every worker on macOS (`+[NSCharacterSet initialize] may have been in progress in another thread when fork() was called`). Two safety rails: a worker never starts its own pool, and any pool failure falls back to serial with a `RuntimeWarning` — identical numbers, just slower. On draft day a broken pool must cost time, not the pick.
 
 **Budgets were deliberately NOT widened.** There is ~10x headroom now, but the leader was already identical at every budget measured, so spending it is a decision to take and re-measure, not a side effect of an optimisation.
 
+### Second pass — 12.4s → 1.4s in the app, 2026-08-22
+
+| stage | one pick at overall 8 |
+|---|---|
+| after the first pass, serial (what the app actually ran) | 12.40s |
+| `+ OpponentBoard`, `+ argsort → sort` | 6.88s |
+| `+ workers`, first pick of a session | 2.08s |
+| `+ workers`, pool warm | **1.4s** |
+
+The 1.4s is measured **in the real Streamlit app**, driven through the UI to pick 8 and on to pick 13 — not in a stand-in script. That distinction matters here: the previous pass's conclusion was wrong precisely because it was reasoned about Streamlit rather than tested against it.
+
+**How "identical" was checked.** A golden file written *before* any change — full recommendations at picks 8, 28 and 53, six raw rollouts, and a 14-pick survival run — and `cmp`'d against the same file after. Identical, sha `b14d4239043ddfd3`. Re-run under `-W error::RuntimeWarning`, so a silent fall back to the serial path would have failed the run instead of flattering the timings.
+
+**First, a correction to the first pass's own diagnosis.** `cProfile` says the rollout is 62% of a call and `pick_probabilities` the top cost. Ablation says the season simulator is the larger half: **4.97s rollouts, 6.89s season sims**. Profiling inflates code that makes tens of millions of tiny calls, which is exactly what the rollout does. The `a ≈ 0.267s` per-rollout constant in `recommender`'s docstring is also stale — it is 25.9ms. Ablate before optimising here; do not trust the profile's shares.
+
+1. **`models.opponent.OpponentBoard` (exact).** A player's `log(adp) − predicted_reach(position)` cannot change during a draft — ADP is static and `predicted_reach` ignores `manager_id` — yet it was rebuilt, and re-argsorted, at every one of the ~29,760 opponent picks, from a freshly built list of ~400 `AvailablePlayer` objects. Resolve it once and a draft state becomes a boolean mask. **The ranking is the part worth understanding:** a stable sort restricted to a subset preserves that subset's relative order, so rank-among-available is how many available players precede you in the one fixed order — a `cumsum`, not a sort. 6.2x on the call; survival, which shares the sampler, went 1.42s → 0.10s. `pick_probabilities` stays as the readable reference, and `test_board_matches_pick_probabilities_exactly` asserts `==`, not `allclose` — a tolerance would defeat the point.
+2. **`sim.season.solve_team_lineups_vectorized` (exact, 2.36x on that block).** With `hindsight=True` — what the recommender uses — the ranking key *is* the value array, so `argsort` plus the gather it feeds are both avoidable: `-np.sort(-masked_key)`. The rows this leaves as `-inf` are exactly the rows both consumers discard on `avail_count`.
+3. **Workers in the app, and a pool that survives the pick.** `_neutral_main` hands the children a `__main__` with nothing to import. Separately, the pool was being built and torn down *inside* the evaluation call — ~0.86s of spawn and context transfer paid at every pick. It is now kept, keyed on the context it was built from.
+
+**Two bugs this surfaced, both of the house type.** `OpponentBoard.index_of` was a `mappingproxy`, which does not pickle: the pool broke, fell back to serial, and printed **the right answer** — the silent 4x the fallback warning exists to catch. And the pool was rebuilt every pick anyway, because `adp_lookup`, `board` and `replacement_means` were each reconstructed per call so the key never matched. Both were invisible in the output and visible only in a timing.
+
+**Keying a live pool on a context is where this could go wrong**, so it is worth stating how it is kept safe: heavy entries are compared by `id`, which is sound *only* because the cache holds a strong reference to the very objects those ids came from. A pool still holding last month's player pool would answer every pick confidently and wrongly — §8's exact failure mode.
+
+**Not done, recorded so it is not re-derived.** (a) 12 candidates over 8 workers is two uneven waves; per-`(candidate, rollout)` tasks would balance it, worth perhaps another 0.3s. (b) Weekly-score sampling is now about half the remaining serial cost and ~1.9s of it is irreducible gamma draws; batching by tier (16 distinct `gamma_shape` values) could roughly halve that, but it reorders the RNG stream — a re-validation, not a free win. (c) The budget allocation is already near-optimal: re-running the Neyman calculation with current per-unit costs gives `M* ≈ 178` against the configured 300, worth under 7%. Do not chase it.
+
+
 ## 16. Session log — 2026-08-11/22
 
-**Shipped:** the pick tree and explorer (§14); the 10.7x speedup (§15); the fitted per-round opponent temperature (§7d); the player selector re-ordered by **ADP** with board rank beside it (it is used to record what *other* managers did, and they draft off ADP — the two disagree by 20.7 places on average, and Cincinnati's D/ST is ADP 174 vs board #404).
+**Shipped:** the pick tree and explorer (§14); two bit-identical speedup passes taking a live pick from 34.2s to 1.4s, the second of which put workers in the Streamlit app after the first pass had concluded that was impossible (§15); the fitted per-round opponent temperature (§7d); the player selector re-ordered by **ADP** with board rank beside it (it is used to record what *other* managers did, and they draft off ADP — the two disagree by 20.7 places on average, and Cincinnati's D/ST is ADP 174 vs board #404).
 
 **Investigated, not solved:** §7e. The engine's collapse in 2023-24 is real and robust across both opponent models. Ruled out: the temperature schedule, ADP coverage, and the QB tilt (re-pricing QB replacement by +2.15 cuts QBs drafted from 3.00 to 0.99 and makes those seasons *worse*).
 
@@ -1123,6 +1157,8 @@ Two dead ends recorded so they are not retried: `forkserver` does *not* avoid im
 | The `baseline` replacement fix is "a no-op" | It loses 4.40pp (2.1σ) — called off a top-40 board and a 25-seed smoke test, both too weak to see it. |
 | The guard's benefit tracks how often the engine takes QB/TE early | Falsified by 2022: the *most* early QB/TE and the guard's *worst* season. Two points looked like a relationship. |
 | The pick-tree page works (with screenshots) | It was blank. I verified a retyped copy, never the generated file. |
+| The live app "must stay serial" — Streamlit has no `__main__` guard | The guard was never the requirement. `spawn` skips the main module when it has no `__spec__` and no `__file__`; the app now runs 8 workers. Reasoned about Streamlit instead of testing it, again (§15). |
+| `cProfile` shows the rollout is 62% of a call | Ablation says the season simulator is the larger half. The profiler inflates call-heavy code, which is exactly what the rollout is. |
 
 **Two structural facts found while digging, both worth more than the bug that surfaced them:**
 

@@ -261,9 +261,12 @@ from ..models.opponent import (
     DEFAULT_TEMPERATURE,
     AdpMatchReport,
     AvailablePlayer,
+    OpponentBoard,
     OpponentModel,
+    build_opponent_board,
     build_pool_adp_lookup,
     sample_pick,
+    sample_pick_on_board,
 )
 from ..models.roster import build_roster
 from ..sim.lineup import RosterPlayer
@@ -696,6 +699,7 @@ def run_rollout(
     rankings: pl.DataFrame | None = None,
     pick_policy: PickPolicy | None = None,
     adp_lookup: Mapping[str, float] | None = None,
+    board: OpponentBoard | None = None,
 ) -> DraftState:
     """Play `state` forward, pick by pick, until every roster is full.
 
@@ -756,6 +760,12 @@ def run_rollout(
         else:
             adp_lookup = {pid: float(p.rank) for pid, p in pool.items()}
 
+    # Like `adp_lookup`, this depends only on (pool, model, adp) -- none of
+    # which change across the rollouts of one recommendation -- so callers
+    # running many rollouts should resolve it once and pass it in.
+    if board is None:
+        board = build_opponent_board(model, pool, adp_lookup)
+
     picks: list[Pick] = list(state.picks)
     rosters: dict[int, list[tuple[str, str]]] = {
         team: list(roster) for team, roster in state.rosters.items()
@@ -765,12 +775,16 @@ def run_rollout(
         for _, position in roster:
             roster_counts[team][position] = roster_counts[team].get(position, 0) + 1
 
+    # A boolean mask over `board.player_ids`, not a list of ids: removing a
+    # player is then one store rather than an O(pool) list rebuild, and the
+    # opponent sampler consumes the mask directly. Our own picks still want
+    # a list of ids, but there are only 18 of those per rollout against
+    # ~160 opponent picks, so it is materialised on demand instead.
     drafted_ids: set[str] = set(state.drafted_ids)
-    available_ids: list[str] = [pid for pid in pool if pid not in drafted_ids]
-    available_players: dict[str, AvailablePlayer] = {
-        pid: AvailablePlayer(player_id=pid, position=entry.position, adp=adp_lookup[pid])
-        for pid, entry in pool.items()
-    }
+    alive = np.fromiter(
+        (pid not in drafted_ids for pid in board.player_ids),
+        dtype=bool, count=board.size,
+    )
 
     total_picks = state.total_picks
     next_overall = state.next_overall_pick
@@ -779,6 +793,7 @@ def run_rollout(
         team = team_for_pick(next_overall, state.n_teams)
 
         if team == our_team:
+            available_ids = [board.player_ids[i] for i in np.flatnonzero(alive)]
             if pick_policy is not None:
                 player_id, position = pick_policy(
                     available_ids, pool, rosters[team], replacement_means, replacement_by_position
@@ -788,16 +803,11 @@ def run_rollout(
                     available_ids, pool, rosters[team], replacement_means, replacement_by_position,
                     n_teams=state.n_teams,
                 )
+            taken = board.index_of[player_id]
         else:
-            # `AvailablePlayer` is frozen and every field is fixed for the
-            # whole rollout, so rebuilding one per player per pick was
-            # constructing ~15 million identical objects per
-            # `recommend_pick`. Build them once and select.
-            candidates = [available_players[pid] for pid in available_ids]
-            player_id = sample_pick(
-                model,
-                manager_id=f"slot_{team}",
-                available=candidates,
+            taken = sample_pick_on_board(
+                board,
+                alive,
                 roster_counts=roster_counts[team],
                 rng=rng,
                 temperature=temperature,
@@ -807,13 +817,13 @@ def run_rollout(
                 # temperature -- see models.opponent.TEMPERATURE_BY_ROUND.
                 round_=(next_overall - 1) // state.n_teams + 1,
             )
+            player_id = board.player_ids[taken]
             position = pool[player_id].position
 
         picks.append(Pick(overall_pick=next_overall, team=team, player_id=player_id, position=position))
         rosters[team].append((player_id, position))
         roster_counts[team][position] = roster_counts[team].get(position, 0) + 1
-        drafted_ids.add(player_id)
-        available_ids = [pid for pid in available_ids if pid != player_id]
+        alive[taken] = False
         next_overall += 1
 
     return DraftState.from_picks(picks, n_teams=state.n_teams, rounds=state.rounds)

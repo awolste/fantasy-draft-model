@@ -654,3 +654,123 @@ def test_lower_temperature_concentrates_probability_on_the_top_of_the_board():
     cold = pick_probabilities(model, "mgr-x", available, temperature=1.0)
     warm = pick_probabilities(model, "mgr-x", available, temperature=10.0)
     assert cold["p0"] > warm["p0"]
+
+
+# ---------------------------------------------------------------------------
+# The precomputed board must be an optimisation, not a model change
+
+
+def _training_frame():
+    """A small fitted-model input covering every position the board pool
+    uses, so `predicted_reach` returns a real per-position effect rather
+    than the unseen-position zero."""
+    rows = []
+    for pos, effect in (("QB", 0.1), ("RB", 0.3), ("WR", -0.2),
+                        ("TE", 0.0), ("K", -0.4), ("DST", -0.3)):
+        rows.extend([(pos, effect)] * 12)
+    n = len(rows)
+    return pl.DataFrame(
+        {
+            "season": [2018] * n,
+            "overall_pick": [10] * n,
+            "round": [1] * n,
+            "manager_id": ["mgr-A"] * n,
+            "position": [r[0] for r in rows],
+            "adp": [10.0] * n,
+            "reach": [r[1] for r in rows],
+        }
+    )
+
+
+def _board_reference_pool(n=120):
+    """A pool with every position represented and no ADP ties."""
+    positions = ["QB", "RB", "WR", "TE", "K", "DST"]
+    return {
+        f"p{i}": type("P", (), {"position": positions[i % len(positions)], "rank": i})()
+        for i in range(1, n + 1)
+    }
+
+
+def test_board_matches_pick_probabilities_exactly():
+    """`OpponentBoard` claims to be arithmetically identical to
+    `pick_probabilities`, so this asserts `==`, not `allclose`.
+
+    A tolerance here would defeat the point: the board exists only to make
+    the same numbers cheaper, and a version that was merely *close* would
+    drift the opponents' draws and silently change every recommendation
+    that depends on them.
+    """
+    from ffdraft.models.opponent import (
+        AvailablePlayer,
+        build_opponent_board,
+        pick_probabilities_on_board,
+    )
+
+    pool = _board_reference_pool()
+    adp = {pid: float(p.rank) * 1.37 + 0.5 for pid, p in pool.items()}
+    model = fit_opponent_model(_training_frame())
+    board = build_opponent_board(model, pool, adp)
+    ids = list(pool)
+
+    rng = np.random.default_rng(0)
+    for trial in range(30):
+        n_gone = int(rng.integers(0, len(ids) - 2))
+        gone = set(rng.choice(len(ids), size=n_gone, replace=False).tolist())
+        alive = np.array([i not in gone for i in range(len(ids))])
+        counts = {pos: int(rng.integers(0, 4)) for pos in ("QB", "RB", "WR", "TE")}
+        round_ = int(rng.integers(1, 18))
+
+        available = [
+            AvailablePlayer(player_id=ids[i], position=pool[ids[i]].position, adp=adp[ids[i]])
+            for i in range(len(ids)) if alive[i]
+        ]
+        expected = pick_probabilities(model, "slot_1", available, counts, round_=round_)
+        alive_idx, got = pick_probabilities_on_board(board, alive, counts, round_=round_)
+
+        assert [ids[i] for i in alive_idx] == list(expected), f"trial {trial}: id order"
+        assert np.array_equal(np.array(list(expected.values())), got), f"trial {trial}: probs"
+
+
+def test_board_draw_matches_sample_pick_exactly():
+    """The same rng seed must produce the same pick through both paths."""
+    from ffdraft.models.opponent import (
+        AvailablePlayer,
+        build_opponent_board,
+        sample_pick_on_board,
+    )
+
+    pool = _board_reference_pool()
+    adp = {pid: float(p.rank) * 1.37 + 0.5 for pid, p in pool.items()}
+    model = fit_opponent_model(_training_frame())
+    board = build_opponent_board(model, pool, adp)
+    ids = list(pool)
+
+    rng = np.random.default_rng(7)
+    for trial in range(30):
+        n_gone = int(rng.integers(0, len(ids) - 2))
+        gone = set(rng.choice(len(ids), size=n_gone, replace=False).tolist())
+        alive = np.array([i not in gone for i in range(len(ids))])
+        counts = {pos: int(rng.integers(0, 3)) for pos in ("RB", "WR")}
+        round_ = int(rng.integers(1, 18))
+
+        available = [
+            AvailablePlayer(player_id=ids[i], position=pool[ids[i]].position, adp=adp[ids[i]])
+            for i in range(len(ids)) if alive[i]
+        ]
+        want = sample_pick(model, "slot_1", available, counts,
+                           np.random.default_rng(trial), round_=round_)
+        got = sample_pick_on_board(board, alive, counts,
+                                   np.random.default_rng(trial), round_=round_)
+        assert ids[got] == want, f"trial {trial}"
+
+
+def test_board_refuses_a_partial_adp_lookup():
+    """A missing ADP would silently change which players opponents take."""
+    from ffdraft.models.opponent import build_opponent_board
+
+    pool = _board_reference_pool(n=12)
+    adp = {pid: float(p.rank) for pid, p in pool.items()}
+    del adp["p5"]
+    model = fit_opponent_model(_training_frame())
+    with pytest.raises(KeyError, match="no entry for 1 pool players"):
+        build_opponent_board(model, pool, adp)

@@ -18,8 +18,13 @@ from ffdraft.live.survival import picks_until_our_next_turn, wait_cost_pp
 
 
 class _FakeModel:
-    """Stands in for OpponentModel; `survival_probabilities` only ever hands
-    it to `sample_pick`, which is monkeypatched in these tests."""
+    """Stands in for OpponentModel. The sampler itself is monkeypatched in
+    these tests, but `survival_probabilities` now builds an `OpponentBoard`
+    first, and that reads `predicted_reach` -- flat here, so the board's
+    ordering is ADP order and the fake sampler's intent is unchanged."""
+
+    def predicted_reach(self, manager_id: str, position: str) -> float:
+        return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -95,10 +100,13 @@ def test_survival_probabilities_are_bounded_and_ordered_by_adp(monkeypatch):
     adp = {f"p{i}": float(i) for i in range(1, 41)}
 
     # Opponents take the lowest-ADP player available, deterministically.
-    def fake_sample_pick(model, manager_id, available, roster_counts, rng, **kw):
-        return min(available, key=lambda a: a.adp).player_id
+    # The seam is now `sample_pick_on_board`, which takes a boolean mask
+    # over the board and returns a board index rather than a player id.
+    def fake_sample_pick(board, alive, roster_counts, rng, **kw):
+        live = np.flatnonzero(alive)
+        return int(min(live, key=lambda i: adp[board.player_ids[i]]))
 
-    monkeypatch.setattr(mod, "sample_pick", fake_sample_pick)
+    monkeypatch.setattr(mod, "sample_pick_on_board", fake_sample_pick)
 
     probs = mod.survival_probabilities(
         candidate_ids=["p1", "p20", "p40"],

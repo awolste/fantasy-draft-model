@@ -39,7 +39,7 @@ import numpy as np
 
 from ..draft.rollout import team_for_pick
 from ..league import DRAFT_ROUNDS
-from ..models.opponent import AvailablePlayer, sample_pick
+from ..models.opponent import build_opponent_board, sample_pick_on_board
 
 DEFAULT_N_SIMS = 300
 # A candidate at or above this is worth deferring, and is eligible to be the
@@ -102,37 +102,48 @@ def survival_probabilities(
     if n_picks <= 0:
         return dict.fromkeys(candidate_ids, 1.0)
 
-    available_ids = [pid for pid in pool if pid not in drafted_ids]
+    # Same board the rollouts use (see `models.opponent.OpponentBoard`).
+    # The `rank` fallback is applied here rather than inside the board,
+    # which insists on full ADP coverage, so this keeps the tolerant
+    # behaviour its own callers rely on without loosening the board's.
+    board = build_opponent_board(
+        model,
+        pool,
+        {pid: adp_by_player_id.get(pid, float(pool[pid].rank)) for pid in pool},
+    )
+    start_alive = np.fromiter(
+        (pid not in drafted_ids for pid in board.player_ids), dtype=bool, count=board.size
+    )
+    candidate_idx = [(pid, board.index_of[pid]) for pid in candidate_ids]
     survived = dict.fromkeys(candidate_ids, 0)
 
     for _ in range(n_sims):
-        gone: set[str] = set()
+        alive = start_alive.copy()
         roster_counts: dict[int, dict[str, int]] = {}
         for offset in range(n_picks):
-            here = [pid for pid in available_ids if pid not in gone]
-            if not here:
+            if not alive.any():
                 break
             team = team_for_pick(first_pick + offset, n_teams)
             counts = roster_counts.setdefault(team, {})
-            candidates = [
-                AvailablePlayer(
-                    player_id=pid,
-                    position=pool[pid].position,
-                    adp=adp_by_player_id.get(pid, float(pool[pid].rank)),
-                )
-                for pid in here
-            ]
-            taken = sample_pick(
-                model, f"slot_{team}", candidates, counts, rng,
+            taken = sample_pick_on_board(
+                board, alive, counts, rng,
                 # Survival must use the same per-round temperature the
                 # rollouts do, or "will he last?" would be answered by a
                 # differently-behaved league than the one being simulated.
                 round_=(first_pick + offset - 1) // n_teams + 1,
             )
-            gone.add(taken)
-            counts[pool[taken].position] = counts.get(pool[taken].position, 0) + 1
-        for pid in candidate_ids:
-            if pid not in gone:
+            alive[taken] = False
+            pos = pool[board.player_ids[taken]].position
+            counts[pos] = counts.get(pos, 0) + 1
+        for pid, idx in candidate_idx:
+            # `not start_alive[idx]` preserves an edge of the list-based
+            # version this replaced: a candidate already drafted before the
+            # call could never appear in the "taken" set, so it counted as
+            # surviving every simulation. No caller passes one -- candidates
+            # come from a recommendation over available players -- but a
+            # rewrite billed as exactly output-preserving has to include the
+            # corners nobody reaches.
+            if alive[idx] or not start_alive[idx]:
                 survived[pid] += 1
 
     return {pid: survived[pid] / n_sims for pid in candidate_ids}

@@ -183,8 +183,13 @@ not as meaningfully behind it.
 
 from __future__ import annotations
 
+import atexit
+import sys
+import threading
 import time
+import types
 import warnings
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
@@ -197,7 +202,12 @@ from multiprocessing import current_process, get_context
 from ..league import DRAFT_SLOT
 from ..models.base import WeeklyDistribution
 from ..models.distribution import PlayerDistribution
-from ..models.opponent import DEFAULT_ROSTER_DECAY, DEFAULT_TEMPERATURE, OpponentModel
+from ..models.opponent import (
+    DEFAULT_ROSTER_DECAY,
+    DEFAULT_TEMPERATURE,
+    OpponentModel,
+    build_opponent_board,
+)
 from ..models.roster import build_roster
 from ..sim.lineup import RosterPlayer
 from ..sim.season import SeasonRosterPlayer, simulate_season
@@ -533,7 +543,7 @@ def measure_variance_decomposition(
 
 def _evaluate_candidate(
     player_id, position, state_picks, n_teams, rounds, pool, model,
-    replacement_by_position, replacement_means, adp_lookup, our_team,
+    replacement_by_position, replacement_means, adp_lookup, board, our_team,
     temperature, roster_decay, rollout_child_seeds, season_seeds,
     n_sims_per_rollout, next_overall_pick,
 ):
@@ -558,7 +568,7 @@ def _evaluate_candidate(
             state_after, pool, model, replacement_by_position,
             np.random.default_rng(child_seed), our_team=our_team,
             temperature=temperature, roster_decay=roster_decay,
-            adp_lookup=adp_lookup,
+            adp_lookup=adp_lookup, board=board,
         )
         rosters = _rosters_for_season(final, pool, replacement_by_position)
         season_result = simulate_season(
@@ -573,20 +583,176 @@ _WORKER: dict = {}
 
 
 def _init_worker(shared: dict) -> None:
-    """Receive the heavy, per-call-constant context once per worker.
+    """Receive the draft-constant context once per worker.
 
-    The player pool, opponent model and replacement distributions are the
-    expensive things to send, and they are identical for every candidate;
-    passing them as initargs sends them once per *worker* rather than once
-    per *task*. Each task then carries only a player id and position.
+    The player pool, opponent model, opponent board and replacement
+    distributions are the expensive things to send, and they are identical
+    for every candidate *and* for every pick of the draft; passing them as
+    initargs sends them once per *worker* rather than once per *task*. Each
+    task then carries only a player id, a position, and the small
+    per-recommendation arguments in `_PER_CALL_KEYS`.
     """
     _WORKER.clear()
     _WORKER.update(shared)
 
 
-def _worker_task(candidate: tuple[str, str]):
-    player_id, position = candidate
-    return _evaluate_candidate(player_id, position, **_WORKER)
+def _worker_task(task: tuple[str, str, dict]):
+    player_id, position, per_call = task
+    return _evaluate_candidate(player_id, position, **_WORKER, **per_call)
+
+
+# `shared` splits in two. The first group is fixed for a whole draft, so a
+# reused pool can hold it; the second changes at every pick and rides along
+# with each task.
+_PER_CALL_KEYS = (
+    "state_picks", "rollout_child_seeds", "season_seeds",
+    "n_sims_per_rollout", "next_overall_pick",
+)
+
+
+@contextmanager
+def _neutral_main():
+    """Present `spawn` with a `__main__` it will not try to re-execute.
+
+    `multiprocessing.spawn.get_preparation_data` tells each child to import
+    the parent's main module -- by name if `__main__.__spec__` is set, else
+    by path if `__main__.__file__` is. A module with neither leaves both out,
+    and the child starts with a bare interpreter, importing only what
+    unpickling the task actually needs.
+
+    **This is what lets the Streamlit app use workers at all.** Streamlit
+    executes the app file as `__main__` and there is nowhere to put an
+    `if __name__ == "__main__"` guard, so without this the children re-run
+    the app -- measured previously at 44.9s against 13.6s serial, while
+    still printing the right answer.
+
+    The swap is process-global, so it is held under a lock and only for as
+    long as workers might be spawned. It relies on how CPython prepares a
+    spawned child, which is why every failure here falls back to the serial
+    loop rather than propagating.
+    """
+    with _MAIN_SWAP_LOCK:
+        saved = sys.modules.get("__main__")
+        stub = types.ModuleType("__main__")
+        stub.__spec__ = None
+        sys.modules["__main__"] = stub
+        try:
+            yield
+        finally:
+            if saved is None:
+                sys.modules.pop("__main__", None)
+            else:
+                sys.modules["__main__"] = saved
+
+
+_DERIVED_LOCK = threading.RLock()
+_DERIVED_CACHE: dict = {}
+
+
+def _derived_context(pool, model, adp_table, rankings, board_adp):
+    """`(adp_lookup, board)` for these inputs, resolved once per draft.
+
+    Both are pure functions of `(pool, model, adp_table, rankings)`, none of
+    which change during a draft, yet both were rebuilt at every pick -- the
+    ADP lookup is a polars join over the whole pool.
+
+    Keeping them also keeps them *identical objects* across picks, which is
+    what lets `_pool_key` recognise an unchanged context and reuse the
+    worker pool; without this the pool was rebuilt every pick, paying ~0.86s
+    to send the same context again.
+
+    Memoised on the identity of the inputs, holding a reference to them so
+    those ids cannot be recycled -- the same discipline `_pool_key` uses,
+    and for the same reason: serving a recommendation from a stale pool is
+    this project's signature failure, not a mere cache miss. Only the most
+    recent entry is kept; a live draft has exactly one context.
+    """
+    key = (id(pool), id(model), id(adp_table), id(rankings))
+    with _DERIVED_LOCK:
+        entry = _DERIVED_CACHE.get("entry")
+        if entry is not None and entry["key"] == key:
+            return entry["adp_lookup"], entry["board"]
+        adp_lookup = board_adp()
+        board = build_opponent_board(model, pool, adp_lookup)
+        _DERIVED_CACHE["entry"] = {
+            "key": key, "adp_lookup": adp_lookup, "board": board,
+            # Strong references, so the ids in `key` stay meaningful.
+            "inputs": (pool, model, adp_table, rankings),
+        }
+        return adp_lookup, board
+
+
+_MAIN_SWAP_LOCK = threading.RLock()
+_POOL_LOCK = threading.RLock()
+_POOL_CACHE: dict = {}
+
+
+def _pool_key(static: dict, n_workers: int) -> tuple:
+    """Identity for the draft-constant context a live pool was built from.
+
+    The heavy entries are compared by `id`, which is only sound because
+    `_POOL_CACHE` keeps a strong reference to the very dict those ids came
+    from: an id cannot be recycled onto a different object while the
+    original is still alive. Values that are cheap to compare are compared
+    by value instead.
+
+    Getting this wrong would be the project's signature failure -- a pool
+    still holding last month's player pool would answer every pick
+    confidently and wrongly -- so a changed context rebuilds rather than
+    reuses.
+    """
+    by_identity = ("pool", "model", "replacement_by_position", "adp_lookup", "board")
+    by_value = ("n_teams", "rounds", "our_team", "temperature", "roster_decay")
+    return (
+        n_workers,
+        tuple(id(static[k]) for k in by_identity),
+        tuple(static[k] for k in by_value),
+        # `replacement_means` is derived fresh on every call, so its id says
+        # nothing; it is six floats, so compare the floats.
+        tuple(sorted(static["replacement_means"].items())),
+    )
+
+
+def shutdown_workers() -> None:
+    """Drop any reused worker pool. Idempotent."""
+    with _POOL_LOCK:
+        entry = _POOL_CACHE.pop("entry", None)
+    if entry is not None:
+        entry["executor"].shutdown(wait=False, cancel_futures=True)
+
+
+atexit.register(shutdown_workers)
+
+
+def _reusable_pool(static: dict, n_workers: int):
+    """A worker pool for this context, started once and kept.
+
+    Starting a spawn pool and sending it the context costs ~0.86s measured,
+    which was previously paid at *every* pick because the pool was built
+    inside the evaluation call and torn down on the way out. Keeping it
+    alive across picks turns that into a one-off. The context is fixed for a
+    whole draft (it comes from one `live_context()`), so there is nothing
+    per-pick for the workers to be told again.
+    """
+    key = _pool_key(static, n_workers)
+    with _POOL_LOCK:
+        entry = _POOL_CACHE.get("entry")
+        if entry is not None and entry["key"] == key:
+            return entry["executor"]
+        if entry is not None:
+            entry["executor"].shutdown(wait=False, cancel_futures=True)
+            _POOL_CACHE.pop("entry", None)
+
+        with _neutral_main():
+            executor = ProcessPoolExecutor(
+                max_workers=n_workers,
+                initializer=_init_worker,
+                initargs=(static,),
+                mp_context=get_context("spawn"),
+            )
+        # `static` is stored, not just its ids -- see `_pool_key`.
+        _POOL_CACHE["entry"] = {"key": key, "executor": executor, "static": static}
+        return executor
 
 
 def _evaluate_all_candidates(
@@ -594,20 +760,22 @@ def _evaluate_all_candidates(
 ) -> dict[str, np.ndarray]:
     """Every candidate's per-rollout probabilities, in parallel if asked.
 
-    ## The caller MUST have an `if __name__ == "__main__"` guard
+    ## The caller does NOT need an `if __name__ == "__main__"` guard
 
-    Every start method available on macOS rebuilds the worker's namespace by
-    executing the *main module*. Without a guard that re-runs the caller's
-    whole script inside every worker: measured here, a guardless script ran
-    itself three times and finished **slower than serial** (44.9s vs 13.6s)
-    while still printing the right answer -- silent waste, and worse if the
-    script has side effects. `forkserver` was tried and does not avoid this;
-    it only moves which process does the importing.
+    It used to. Every start method available on macOS rebuilds a worker's
+    namespace by executing the *main module*, so without a guard the
+    workers re-ran the caller's whole script: measured, a guardless script
+    ran itself three times and finished **slower than serial** (44.9s vs
+    13.6s) while still printing the right answer. `forkserver` does not
+    avoid this; it only moves which process does the importing.
 
-    **This is why parallelism is opt-in and off by default.** A Streamlit
-    script never has that guard, so the live draft-day app must stay serial;
-    batch scripts with a `main()` entry point can and should turn it on.
-    Nested use is also blocked below -- a worker never starts its own pool.
+    `_neutral_main` removes the requirement by giving the children a
+    `__main__` with nothing to import, which is what lets the Streamlit app
+    -- where there is nowhere to put a guard -- use workers at all. A guard
+    is still the more robust arrangement where a script can have one.
+
+    Nested use stays blocked: a worker never starts its own pool, or
+    `recommend_pick` called from inside one would fan out multiplicatively.
 
     ## Why it still falls back
 
@@ -616,30 +784,26 @@ def _evaluate_all_candidates(
     **identical** numbers (candidates are independent and their seeds are
     fixed in the parent) and merely takes longer. The fallback warns rather
     than passing silently, so a permanently broken pool is visible instead
-    of quietly costing 4x on every pick for the rest of the draft.
+    of quietly costing 4x on every pick for the rest of the draft -- which
+    is exactly how an unpicklable field in `OpponentBoard` was caught.
     """
     per_candidate_p_r: dict[str, np.ndarray] = {}
 
-    # Never let a worker start its own pool: `recommend_pick` called from
-    # inside a worker (a script that parallelises at a higher level) would
-    # otherwise fan out multiplicatively.
     in_worker = current_process().name != "MainProcess"
 
     if n_workers > 1 and len(candidates) > 1 and not in_worker:
         try:
-            ctx = get_context("spawn")
-            with ProcessPoolExecutor(
-                max_workers=min(n_workers, len(candidates)),
-                initializer=_init_worker,
-                initargs=(shared,),
-                mp_context=ctx,
-            ) as pool_exec:
-                for pid, p_r in pool_exec.map(
-                    _worker_task, [(c.player_id, c.position) for c in candidates]
-                ):
+            per_call = {k: shared[k] for k in _PER_CALL_KEYS}
+            static = {k: v for k, v in shared.items() if k not in _PER_CALL_KEYS}
+            executor = _reusable_pool(static, min(n_workers, len(candidates)))
+            tasks = [(c.player_id, c.position, per_call) for c in candidates]
+            with _neutral_main():
+                for pid, p_r in executor.map(_worker_task, tasks):
                     per_candidate_p_r[pid] = p_r
             return per_candidate_p_r
         except Exception as exc:  # noqa: BLE001 -- any pool failure is recoverable
+            # A broken pool must not be reused for the rest of the draft.
+            shutdown_workers()
             warnings.warn(
                 f"parallel candidate evaluation failed ({type(exc).__name__}: {exc}); "
                 f"falling back to serial. Results are unaffected, only slower.",
@@ -736,20 +900,24 @@ def recommend_pick(
     # Resolve ADP once. `run_rollout` would otherwise redo this polars join
     # on every one of the `n_candidates * n_rollouts` rollouts, for an
     # answer that cannot change.
-    if adp_table is not None:
-        if rankings is None:
-            raise ValueError(
-                "rankings must be supplied whenever adp_table is given -- it is needed to "
-                "resolve D/ST team abbreviations for the ADP join (see pool_adp_lookup)."
-            )
-        adp_lookup, _adp_report = pool_adp_lookup(pool, adp_table, rankings)
-    else:
-        adp_lookup = {pid: float(entry.rank) for pid, entry in pool.items()}
+    if adp_table is not None and rankings is None:
+        raise ValueError(
+            "rankings must be supplied whenever adp_table is given -- it is needed to "
+            "resolve D/ST team abbreviations for the ADP join (see pool_adp_lookup)."
+        )
+
+    def _resolve_adp():
+        if adp_table is not None:
+            return pool_adp_lookup(pool, adp_table, rankings)[0]
+        return {pid: float(entry.rank) for pid, entry in pool.items()}
+
+    adp_lookup, board = _derived_context(pool, model, adp_table, rankings, _resolve_adp)
 
     shared = dict(
         state_picks=tuple(state.picks), n_teams=state.n_teams, rounds=state.rounds,
         pool=pool, model=model, replacement_by_position=replacement_by_position,
-        replacement_means=replacement_means, adp_lookup=adp_lookup, our_team=our_team,
+        replacement_means=replacement_means, adp_lookup=adp_lookup, board=board,
+        our_team=our_team,
         temperature=temperature, roster_decay=roster_decay,
         rollout_child_seeds=list(rollout_child_seeds), season_seeds=season_seeds,
         n_sims_per_rollout=n_sims_per_rollout,

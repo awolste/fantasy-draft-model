@@ -72,7 +72,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import polars as pl
@@ -760,6 +760,179 @@ def pick_probabilities(
         probs = weight / total
 
     return dict(zip(player_ids, probs.tolist()))
+
+
+# ---------------------------------------------------------------------------
+# The same distribution, precomputed for the rollout inner loop
+
+
+@dataclass(frozen=True)
+class OpponentBoard:
+    """Everything in `pick_probabilities` that a draft cannot change.
+
+    ## Why this exists
+
+    A player's `adjusted_log_pick` -- `log(adp) - predicted_reach(position)`
+    -- is fixed for the whole draft: ADP is static, and `predicted_reach` is
+    league-wide (it ignores `manager_id` entirely; see that method). Yet
+    `pick_probabilities` rebuilt it, and the argsort over it, at every one
+    of the ~29,760 opponent picks behind a single `recommend_pick`, from a
+    freshly built Python list of ~400 `AvailablePlayer` objects.
+
+    Resolving it once turns each pick into a handful of O(pool) numpy ops
+    with no per-player Python work at all. **The ranking is the part worth
+    understanding:** a stable sort restricted to a subset preserves the
+    relative order of that subset, so a player's rank among the *available*
+    players is just how many available players sit ahead of it in the one
+    fixed order -- a `cumsum`, not a sort.
+
+    ## Exactness
+
+    This is an optimisation, not a model change, and it is held to that:
+    `tests/test_opponent.py::test_board_matches_pick_probabilities_exactly`
+    asserts `==` (not `allclose`) against `pick_probabilities` across random
+    draft states. `pick_probabilities` stays as the readable reference the
+    board is checked against, and remains what the offline backtest and the
+    temperature fit call.
+    """
+
+    player_ids: tuple[str, ...]
+    """Pool order. Indices into this tuple are the board's player ids."""
+    positions: tuple[str, ...]
+    """The distinct positions, sorted -- the index space of `pos_code`."""
+    pos_code: np.ndarray
+    rank_order: np.ndarray
+    """Pool indices sorted by `adjusted_log_pick`, most-wanted first,
+    stably -- so restricting it to the available players reproduces
+    `pick_probabilities`'s own `np.argsort(..., kind="stable")` exactly."""
+
+    index_of: Mapping[str, int]
+    """`player_id` -> its index in `player_ids`, so a caller holding an id
+    (our own greedy pick) can mark it drafted without scanning."""
+
+    @property
+    def size(self) -> int:
+        return len(self.player_ids)
+
+
+def build_opponent_board(
+    model: OpponentModel,
+    pool: Mapping[str, Any],
+    adp_by_player_id: Mapping[str, float],
+) -> OpponentBoard:
+    """Resolve `pool` into an `OpponentBoard` once, for the rollout loop.
+
+    `pool` values need only a `.position`; `adp_by_player_id` must have an
+    entry for every player in `pool` (`rollout.pool_adp_lookup` guarantees
+    that, extrapolating for anyone unmatched). A missing entry raises rather
+    than defaulting, because a silently substituted ADP would change which
+    players opponents take and never say so.
+    """
+    player_ids = tuple(pool)
+    position_of = [pool[pid].position for pid in player_ids]
+    positions = tuple(sorted(set(position_of)))
+    code_of = {pos: i for i, pos in enumerate(positions)}
+    n = len(player_ids)
+
+    pos_code = np.fromiter((code_of[pos] for pos in position_of), dtype=np.intp, count=n)
+    missing = [pid for pid in player_ids if pid not in adp_by_player_id]
+    if missing:
+        raise KeyError(
+            f"adp_by_player_id has no entry for {len(missing)} pool players "
+            f"(e.g. {missing[:3]}) -- pass a lookup covering the whole pool, "
+            "such as rollout.pool_adp_lookup's, rather than a partial match."
+        )
+    adp = np.fromiter((adp_by_player_id[pid] for pid in player_ids), dtype=float, count=n)
+
+    reach = np.array([model.predicted_reach("", pos) for pos in positions])
+    adjusted_log_pick = np.log(adp) - reach[pos_code]
+
+    return OpponentBoard(
+        player_ids=player_ids,
+        positions=positions,
+        pos_code=pos_code,
+        rank_order=np.argsort(adjusted_log_pick, kind="stable"),
+        # A plain dict, not a MappingProxyType: the board travels to the
+        # worker processes as `ProcessPoolExecutor` initargs, and a
+        # mappingproxy is not picklable. Caught by
+        # `test_parallel_and_serial_give_identical_results`, which fell back
+        # to serial with a warning rather than failing -- i.e. it would have
+        # cost every parallel caller 4x and still printed the right answer.
+        index_of={pid: i for i, pid in enumerate(player_ids)},
+    )
+
+
+def pick_probabilities_on_board(
+    board: OpponentBoard,
+    alive: np.ndarray,
+    roster_counts: Mapping[str, int] = _EMPTY_ROSTER_COUNTS,
+    temperature: float | None = None,
+    roster_decay: float = DEFAULT_ROSTER_DECAY,
+    round_: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """`pick_probabilities` over a boolean `alive` mask.
+
+    Returns `(alive_idx, probs)`, both aligned: `alive_idx` are board
+    indices in board (= pool) order, `probs[k]` is the probability for
+    `alive_idx[k]`. Every arithmetic step matches `pick_probabilities`,
+    including the order the weights are summed in -- which is why
+    `alive_idx` stays in board order rather than the rank order the ranking
+    is computed in. Float addition is not associative, so summing the same
+    weights in a different order would move the last bit of every
+    probability.
+    """
+    if alive.shape != (board.size,):
+        raise ValueError(
+            f"alive has shape {alive.shape}, expected ({board.size},) to match the board"
+        )
+    temperature = _resolve_temperature(temperature, round_)
+
+    alive_idx = np.flatnonzero(alive)
+    n = alive_idx.size
+    if n == 0:
+        return alive_idx, np.empty(0, dtype=float)
+
+    # Rank among the available players, without sorting: walk the one fixed
+    # global order and count how many available players precede each slot.
+    rank_order = board.rank_order
+    rank_by_pool = np.empty(board.size, dtype=float)
+    rank_by_pool[rank_order] = np.cumsum(alive[rank_order]) - 1
+    rank = rank_by_pool[alive_idx]
+
+    multiplier = np.array([
+        max(roster_decay ** roster_counts.get(pos, 0), _MIN_ROSTER_MULTIPLIER)
+        for pos in board.positions
+    ])
+    weight = np.exp(-rank / temperature) * multiplier[board.pos_code[alive_idx]]
+
+    total = weight.sum()
+    if total <= 0:
+        return alive_idx, np.full(n, 1.0 / n)
+    return alive_idx, weight / total
+
+
+def sample_pick_on_board(
+    board: OpponentBoard,
+    alive: np.ndarray,
+    roster_counts: Mapping[str, int],
+    rng: np.random.Generator,
+    temperature: float | None = None,
+    roster_decay: float = DEFAULT_ROSTER_DECAY,
+    round_: int | None = None,
+) -> int:
+    """`sample_pick`, over a boolean `alive` mask, returning a board index.
+
+    Reproduces the second, redundant normalisation `sample_pick` does before
+    `rng.choice` rather than tidying it away: tidying it would perturb the
+    last bit of `probs` and, eventually, somebody's pick.
+    """
+    alive_idx, probs = pick_probabilities_on_board(
+        board, alive, roster_counts, temperature, roster_decay, round_
+    )
+    if alive_idx.size == 0:
+        raise ValueError("sample_pick called with no available players")
+    probs = probs / probs.sum()
+    return int(alive_idx[rng.choice(alive_idx.size, p=probs)])
 
 
 def sample_pick(
