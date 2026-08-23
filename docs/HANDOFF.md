@@ -995,17 +995,17 @@ Three cases, because the honest advice genuinely differs: no next turn (nothing 
 
 **Corrected same day, after the owner read it in the app.** `wait_cost_pp` is zero whenever a *comparable* candidate is likely to last — so it is zero for a player who is **7%** to survive sitting beside one who is 69%. The first version rendered that as "free to pass" and then summarised the whole list as *"they are all likely to last until your next turn"*, which was flatly false, and false in the worst direction: about the one player you were most at risk of losing.
 
-**A zero cost means "your fallback is as good", never "he will be there".** The callout now states survival first on every line, and never infers availability from a zero cost. When the costs are all zero but somebody is scarce, the advice is the actionable one — title equity is exhausted, so take the scarce player, because that is how you most likely end up with two of these rather than one.
+**A zero cost is now simply not shown.** The first correction kept it and explained it — "passing costs nothing extra", plus three sentences on why that did not mean he would last. The owner's second reading was the better one: *a number that discriminates nothing and needs a paragraph of defence should not be on screen.* When every cost is zero, survival is the entire decision and the lines say only that; a non-zero cost is real information and is still shown. Deleting the number deleted the need to explain it.
 
 `choose_from_tied` had the identical blind spot: with every wait cost at zero it fell through to championship probability and took the *available* player over the scarce one, losing the scarce one for nothing. `p_survive` is now its second key, right after `wait_cost_pp`. That also subsumes the K/D-ST demotion in the common case — kickers survive at ~100%, so ascending survival sorts them last on its own.
 
 Live at pick 8 it renders:
 
-> **2 candidates are statistically indistinguishable from the leader.** … Decide on **availability** instead:
-> - **Chase Brown** (RB) — **7%** likely to still be there · passing costs nothing extra
-> - **Brock Bowers** (TE) — **69%** likely to still be there · passing costs nothing extra
+> **2 candidates are statistically indistinguishable from the leader** — the gaps between them are smaller than the uncertainty *in* those gaps, so their order carries no information. Decide on **availability**:
+> - **Chase Brown** (RB) — **7%** likely to still be there
+> - **Brock Bowers** (TE) — **69%** likely to still be there
 >
-> Nobody costs extra to pass, because whoever you skip has a comparable fallback still on the board — that is **not** the same as everyone lasting. **Chase Brown** is the least likely to survive (7%), so taking him is how you most likely end up with two of these rather than one.
+> Take **Chase Brown** — at 7% he is the one you are least likely to still have.
 
 ### Player photos — asked, measured, declined 2026-08-22
 
@@ -1284,6 +1284,7 @@ Worst case **16.7s, leaving 28.3s of clock** to read the table and enter the pic
 | The live app "must stay serial" — Streamlit has no `__main__` guard | The guard was never the requirement. `spawn` skips the main module when it has no `__spec__` and no `__file__`; the app now runs 8 workers. Reasoned about Streamlit instead of testing it, again (§15). |
 | `cProfile` shows the rollout is 62% of a call | Ablation says the season simulator is the larger half. The profiler inflates call-heavy code, which is exactly what the rollout is. |
 | A zero `wait_cost_pp` means the player is likely to last | It means a *comparable* player is likely to last. The callout said "free to pass · 7% still there" and summarised it as "all likely to last" — false about the very player most at risk. Caught by the owner reading the app, not by a test. |
+| Fixing it meant explaining the zero more carefully | It meant deleting the zero. My first fix annotated a misleading number with three sentences of defence; the owner pointed out the number itself was the problem. Removing what discriminates nothing removed the need to explain it. |
 
 **Two structural facts found while digging, both worth more than the bug that surfaced them:**
 

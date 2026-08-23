@@ -133,39 +133,28 @@ def describe_tie(tied: Sequence[dict]) -> str:
     """Markdown explaining a tie, and what to decide on instead.
 
     The flag is routinely read as "these have different numbers, why is the
-    tool calling them equal" -- so this says the actual reason once
-    (the gaps are smaller than the uncertainty *in* the gaps) and then
-    redirects to the dimension that is still informative.
+    tool calling them equal", so this states the reason once and then
+    redirects to the dimension that still discriminates: availability.
 
-    **`wait_cost_pp == 0` does not mean he will still be there.** It means
-    passing costs nothing *in expectation*, because a comparably good
-    candidate is likely to last -- so it is zero for a player who is 7% to
-    survive whenever someone at least as good is 69% to survive. An earlier
-    version rendered that as "free to pass" and then summarised the whole
-    list as "they are all likely to last until your next turn", which was
-    plainly false and was caught by the owner reading it. Survival is now
-    stated first, in every line, and the summary never infers availability
-    from a zero cost.
+    **A zero `wait_cost_pp` is not shown at all.** It means a *comparable*
+    candidate is likely to last -- not that this one will -- so it is zero
+    for a player who is 7% to survive sitting beside one who is 69%. An
+    earlier version printed it as "free to pass", which was misleading, and
+    then spent three sentences explaining why it was not. A number that
+    discriminates nothing and needs a paragraph of defence should not be on
+    screen: when every cost is zero, survival is the entire decision, and
+    the lines say only that. A *non*-zero cost is real information and is
+    shown.
 
-    Ordered by `wait_cost_pp` then by ascending `p_survive`, matching
-    `choose_from_tied`; when the costs are all zero, scarcity is the whole
-    decision and the ordering has to reflect that.
-
-    Four cases, because the honest advice genuinely differs:
-
-    * no next turn (our last pick) -- nothing to wait for, so judgement;
-    * somebody costs real equity to pass -- name him;
-    * costs are all zero but somebody is scarce -- the candidates are
-      interchangeable on title equity, so take the one you are least
-      likely to still have, and you probably keep the others too;
-    * costs are all zero and everybody is likely to last -- say there is no
-      urgency, because that is a real answer.
+    Ordered by `wait_cost_pp` then ascending `p_survive`, matching
+    `choose_from_tied`, and the closing line names the same player that
+    function would pick.
     """
     n = len(tied)
     head = (
-        f"**{n} candidates are statistically indistinguishable from the leader.** "
-        f"The gaps between them are smaller than the uncertainty *in* those gaps, "
-        f"so the order they are listed in carries no information."
+        f"**{n} candidates are statistically indistinguishable from the leader** "
+        f"— the gaps between them are smaller than the uncertainty *in* those "
+        f"gaps, so their order carries no information."
     )
 
     rated = [r for r in tied if r.get("wait_cost_pp") is not None]
@@ -187,42 +176,28 @@ def describe_tie(tied: Sequence[dict]) -> str:
             if r.get("p_survive") is not None
             else "survival unknown"
         )
-        + (
-            f" · passing costs {r['wait_cost_pp']:.2f}pp"
-            if r["wait_cost_pp"]
-            else " · passing costs nothing extra"
-        )
+        + (f" · passing costs **{r['wait_cost_pp']:.2f}pp**" if r["wait_cost_pp"] else "")
         for r in ranked
     )
 
     top = ranked[0]
     if top["wait_cost_pp"]:
         tail = (
-            f"\n\n**{top['name']}** costs the most to pass on "
-            f"({top['wait_cost_pp']:.2f}pp) — he is the one least likely to be "
-            f"there at your next pick."
+            f"Take **{top['name']}** — passing costs {top['wait_cost_pp']:.2f}pp "
+            f"of title equity."
         )
     elif survival(top) < LIKELY_SURVIVOR:
-        # Every cost is zero because whoever you pass on has a comparable
-        # fallback still on the board -- NOT because everyone will last.
-        # With title equity exhausted, scarcity is the entire decision:
-        # take the scarce one and you probably keep the others too.
         tail = (
-            f"\n\nNobody costs extra to pass, because whoever you skip has a "
-            f"comparable fallback still on the board — that is **not** the same "
-            f"as everyone lasting. **{top['name']}** is the least likely to "
-            f"survive ({survival(top) * 100:.0f}%), so taking him is how you most "
-            f"likely end up with two of these rather than one."
+            f"Take **{top['name']}** — at {survival(top) * 100:.0f}% he is the one "
+            f"you are least likely to still have."
         )
     else:
         tail = (
-            f"\n\nAll of them are likely to last until your next turn (lowest is "
-            f"{survival(top) * 100:.0f}%). No urgency here — decide on roster need."
+            f"No urgency — all of them should last (lowest is "
+            f"{survival(top) * 100:.0f}%). Decide on roster need."
         )
 
-    return (
-        f"{head} Decide on **availability** instead:\n\n{lines}{tail}"
-    )
+    return f"{head} Decide on **availability**:\n\n{lines}\n\n{tail}"
 
 
 def choose_from_tied(

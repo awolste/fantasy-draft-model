@@ -179,7 +179,7 @@ def test_describe_tie_orders_by_wait_cost_not_by_championship_probability():
     ]
     text = describe_tie(rows)
     assert text.index("Scarce") < text.index("Safe")
-    assert "**Scarce** costs the most to pass on" in text
+    assert "Take **Scarce**" in text
 
 
 def test_describe_tie_breaks_zero_wait_cost_ties_by_survival():
@@ -198,7 +198,7 @@ def test_describe_tie_says_no_urgency_when_everybody_survives():
     pick one would be worse than saying so."""
     text = describe_tie([_tied_row("A", survive=0.95), _tied_row("B", survive=0.99)])
     assert "No urgency" in text
-    assert "costs the most to pass on" not in text
+    assert "Take **" not in text
 
 
 def test_describe_tie_falls_back_to_judgement_at_our_last_pick():
@@ -223,7 +223,7 @@ def test_describe_tie_agrees_with_the_automatic_choice():
     ]
     chosen = choose_from_tied(rows, counts={}, rounds_left=12)
     assert chosen["name"] == "Scarce"
-    assert f"**{chosen['name']}** costs the most to pass on" in describe_tie(rows)
+    assert f"Take **{chosen['name']}**" in describe_tie(rows)
 
 
 def test_zero_wait_cost_does_not_claim_the_player_will_last():
@@ -241,14 +241,17 @@ def test_zero_wait_cost_does_not_claim_the_player_will_last():
     ]
     text = describe_tie(rows)
 
-    assert "likely to last" not in text
     assert "free to pass" not in text
+    assert "costs nothing" not in text
+    # A zero cost discriminates nothing, so it is not printed at all --
+    # only a real, non-zero cost earns space.
+    assert "0.00pp" not in text
     # Survival is stated for every candidate, and stated first.
     assert "**7%** likely to still be there" in text
     assert "**69%** likely to still be there" in text
     # And the advice is the actionable one: take the scarce player, because
     # that is how you most likely end up with both.
-    assert "**Scarce** is the least likely to survive (7%)" in text
+    assert "Take **Scarce** — at 7% he is the one you are least likely to still have" in text
 
 
 def test_no_urgency_still_says_so_when_everybody_really_does_survive():
@@ -258,8 +261,8 @@ def test_no_urgency_still_says_so_when_everybody_really_does_survive():
         _tied_row("B", wait=0.0, survive=0.96),
     ]
     text = describe_tie(rows)
-    assert "All of them are likely to last" in text
-    assert "least likely to survive" not in text
+    assert "No urgency — all of them should last" in text
+    assert "least likely to still have" not in text
 
 
 def test_automatic_choice_takes_the_scarce_player_on_a_tie_of_zero_costs():
@@ -272,7 +275,7 @@ def test_automatic_choice_takes_the_scarce_player_on_a_tie_of_zero_costs():
     ]
     assert choose_from_tied(rows, counts={}, rounds_left=12)["name"] == "Scarce"
     # ...and the callout must not name a different player than the chooser.
-    assert "**Scarce** is the least likely to survive" in describe_tie(rows)
+    assert "Take **Scarce**" in describe_tie(rows)
 
 
 def test_a_real_wait_cost_still_outranks_mere_scarcity():
@@ -283,4 +286,4 @@ def test_a_real_wait_cost_still_outranks_mere_scarcity():
         _tied_row("Scarcer", position="RB", wait=0.0, survive=0.05, champ=0.20),
     ]
     assert choose_from_tied(rows, counts={}, rounds_left=12)["name"] == "Costly"
-    assert "**Costly** costs the most to pass on (1.20pp)" in describe_tie(rows)
+    assert "Take **Costly** — passing costs 1.20pp" in describe_tie(rows)
